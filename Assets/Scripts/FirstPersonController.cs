@@ -29,6 +29,7 @@ public class FirstPersonController : MonoBehaviour
     float pitch;        // camera up/down angle, kept separately so it can be clamped
     Vector3 spawnPosition;
     Quaternion spawnRotation;
+    bool inputEnabled = true;   // off while a menu has the mouse
 
     void Awake()
     {
@@ -57,6 +58,13 @@ public class FirstPersonController : MonoBehaviour
         var kb = Keyboard.current;
         var mouse = Mouse.current;
 
+        // with input off, still run Move with no keyboard so gravity keeps working
+        if (!inputEnabled)
+        {
+            Move(null);
+            return;
+        }
+
         UpdateCursorLock(kb, mouse);
 
         // only look around while the cursor is captured, so a free cursor can click the editor
@@ -78,6 +86,13 @@ public class FirstPersonController : MonoBehaviour
             SetCursorLocked(true);
     }
 
+    // menus call this to take the mouse (false) and give it back (true)
+    public void SetInputEnabled(bool enabled)
+    {
+        inputEnabled = enabled;
+        SetCursorLocked(enabled);
+    }
+
     void SetCursorLocked(bool locked)
     {
         Cursor.lockState = locked ? CursorLockMode.Locked : CursorLockMode.None;
@@ -96,23 +111,28 @@ public class FirstPersonController : MonoBehaviour
             cameraPivot.localRotation = Quaternion.Euler(pitch, 0f, 0f);
     }
 
-    void Move(Keyboard kb)
+    // WASD as a direction (x is strafe, y is forward/back), plus the sprint and jump keys
+    static Vector2 ReadMoveInput(Keyboard kb, out bool sprint, out bool jump)
     {
-        // build a direction from WASD: x is strafe, y is forward/back
         Vector2 input = Vector2.zero;
-        bool sprint = false, jump = false;
-        if (kb != null)
-        {
-            if (kb.wKey.isPressed) input.y += 1f;
-            if (kb.sKey.isPressed) input.y -= 1f;
-            if (kb.dKey.isPressed) input.x += 1f;
-            if (kb.aKey.isPressed) input.x -= 1f;
-            sprint = kb.leftShiftKey.isPressed;
-            jump = kb.spaceKey.wasPressedThisFrame;
-        }
+        sprint = false;
+        jump = false;
+        if (kb == null) return input;
+
+        if (kb.wKey.isPressed) input.y += 1f;
+        if (kb.sKey.isPressed) input.y -= 1f;
+        if (kb.dKey.isPressed) input.x += 1f;
+        if (kb.aKey.isPressed) input.x -= 1f;
+        sprint = kb.leftShiftKey.isPressed;
+        jump = kb.spaceKey.wasPressedThisFrame;
 
         // stops diagonals from being faster than straight movement
-        input = Vector2.ClampMagnitude(input, 1f);
+        return Vector2.ClampMagnitude(input, 1f);
+    }
+
+    void Move(Keyboard kb)
+    {
+        Vector2 input = ReadMoveInput(kb, out bool sprint, out bool jump);
 
         bool grounded = controller.isGrounded;
         if (grounded && velocity.y < 0f) velocity.y = -2f;   // keep snapped to the ground

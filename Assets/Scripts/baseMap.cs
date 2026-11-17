@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.InputSystem;
 #if UNITY_EDITOR
@@ -16,6 +17,9 @@ public class baseMap : MonoBehaviour
     [Tooltip("When leaving Play mode, keep the seed you were on instead of reverting it.")]
     public bool keepPlayModeSeed = true;
 
+    [Header("Map Constraints")]
+    public MapConstraints constraints = new MapConstraints();
+
     [Header("3D Build")]
     public bool build3D = true;
     [Tooltip("World size of one grid cell.")]
@@ -27,7 +31,7 @@ public class baseMap : MonoBehaviour
     public Material floorMaterial;
     public Material wallMaterial;
     public Material ceilingMaterial;
-    [Tooltip("Move the player into the first room on Play and on a new seed.")]
+    [Tooltip("Move the player into the attacker spawn (or the first room) on Play and on a new seed.")]
     public bool spawnPlayerInMap = true;
 
     [Header("Scene View (Gizmos)")]
@@ -45,17 +49,27 @@ public class baseMap : MonoBehaviour
     static readonly Color CorridorColor = new Color(0.55f, 0.85f, 0.75f, 1f);
     static readonly Color PlayerColor = new Color(0.95f, 0.3f, 0.3f, 1f);
 
+    // role colors differ in lightness as well as hue so they stay readable on the minimap
+    static readonly Color AttackerColor = new Color(0.95f, 0.45f, 0.2f, 1f);
+    static readonly Color DefenderColor = new Color(0.25f, 0.45f, 0.95f, 1f);
+    static readonly Color MidColor = new Color(0.75f, 0.55f, 0.95f, 1f);
+    static readonly Color SiteColor = new Color(0.35f, 0.85f, 0.4f, 1f);
+
     const string GeneratedRootName = "Generated Map";
 
-    public BSPLayout Layout { get; private set; }
+    // the solved map: layout plus room roles and the constraint report
+    public MapPlan Plan { get; private set; }
+    public BSPLayout Layout => Plan?.layout;
 
     Texture2D overlayTexture;
     bool overlayDirty = true;   // set when the layout changes so the minimap redraws once
     string statusMessage;
     float statusUntil;
+    GUIStyle centeredLabel;
 
     Mesh floorMesh, wallMesh, ceilingMesh;
     FirstPersonController player;
+    MapUI ui;
 
     // runs in edit mode too (ExecuteAlways), so the map appears as soon as the scene opens
     void OnEnable()
@@ -77,6 +91,10 @@ public class baseMap : MonoBehaviour
         if (!Application.isPlaying) return;
         player = FindAnyObjectByType<FirstPersonController>();
         SpawnPlayer();
+
+        // the in-game generator panel, added here so older scenes get it without any setup
+        ui = GetComponent<MapUI>();
+        if (ui == null) ui = gameObject.AddComponent<MapUI>();
     }
 
     // called whenever a value changes in the inspector
@@ -108,10 +126,10 @@ public class baseMap : MonoBehaviour
     }
 #endif
 
-    // rebuilds everything from the current seed: layout data, then minimap, then 3D
+    // rebuilds everything from the current seed: layout and roles, then minimap, then 3D
     public void Generate()
     {
-        Layout = BSPGenerator.Generate(seed, settings);
+        Plan = MapConstraintSolver.Solve(seed, settings, constraints);
         overlayDirty = true;
         BuildGeometry();
     }
@@ -128,14 +146,14 @@ public class baseMap : MonoBehaviour
         Generate(Random.Range(0, int.MaxValue));
     }
 
-    // generates the current seed twice from scratch and checks both layouts match
+    // solves the current seed twice from scratch and checks both plans match, roles included
     public bool VerifyDeterminism()
     {
-        int a = BSPGenerator.Generate(seed, settings).Hash;
-        int b = BSPGenerator.Generate(seed, settings).Hash;
+        int a = MapConstraintSolver.Solve(seed, settings, constraints).Hash;
+        int b = MapConstraintSolver.Solve(seed, settings, constraints).Hash;
 
-        // also compare against the layout already on screen
-        bool match = a == b && (Layout == null || Layout.Hash == a);
+        // also compare against the plan already on screen
+        bool match = a == b && (Plan == null || Plan.Hash == a);
         if (match)
             Debug.Log($"[baseMap] Seed {seed} is deterministic (hash {a:X8}).");
         else
@@ -150,26 +168,31 @@ public class baseMap : MonoBehaviour
         var kb = Keyboard.current;
         if (kb == null) return;
 
-        // M toggles the minimap
+        // while the panel is open, letters belong to its text field
+        if (ui != null && ui.IsOpen) return;
+
+        // M toggles the minimap, N rolls a new map, R rebuilds the current one
         if (kb.mKey.wasPressedThisFrame) showOverlay = !showOverlay;
+        if (kb.nKey.wasPressedThisFrame) NewMap();
+        if (kb.rKey.wasPressedThisFrame) RegenerateAndCheck();
+    }
 
-        // N rolls a new map and moves the player into it, since the old position may now be inside a wall
-        if (kb.nKey.wasPressedThisFrame)
-        {
-            RandomizeSeed();
-            SpawnPlayer();
-            SetStatus($"New seed {seed} -> hash {Layout.Hash:X8}");
-        }
+    // moves the player into the new map too, since the old position may now be inside a wall
+    void NewMap()
+    {
+        RandomizeSeed();
+        SpawnPlayer();
+        SetStatus($"New seed {seed} -> hash {Plan.Hash:X8}");
+    }
 
-        // R rebuilds the same seed, the hash should not change
-        if (kb.rKey.wasPressedThisFrame)
-        {
-            int before = Layout.Hash;
-            Generate();
-            SetStatus(before == Layout.Hash
-                ? $"Regenerated seed {seed}: identical layout (hash {Layout.Hash:X8})"
-                : $"Regenerated seed {seed}: MISMATCH {before:X8} vs {Layout.Hash:X8}");
-        }
+    // rebuilds the same seed, the hash should not change
+    void RegenerateAndCheck()
+    {
+        int before = Plan.Hash;
+        Generate();
+        SetStatus(before == Plan.Hash
+            ? $"Regenerated seed {seed}: identical layout (hash {Plan.Hash:X8})"
+            : $"Regenerated seed {seed}: MISMATCH {before:X8} vs {Plan.Hash:X8}");
     }
 
     // shows a message under the minimap for 3 seconds
@@ -264,13 +287,13 @@ public class baseMap : MonoBehaviour
         else DestroyImmediate(obj);
     }
 
-    // puts the player in the middle of the first room
+    // puts the player in the middle of the attacker spawn, or the first room if there are no roles
     public void SpawnPlayer()
     {
         if (!spawnPlayerInMap || !build3D || player == null || Layout == null || Layout.rooms.Count == 0) return;
 
         // lift slightly so the capsule starts just above the floor instead of inside it
-        var r = Layout.rooms[0];
+        var r = Layout.rooms[Mathf.Max(0, Plan.attackerSpawn)];
         Vector3 pos = CellToWorld(r.center.x, r.center.y) + Vector3.up * 0.05f;
         player.Teleport(pos, player.transform.rotation);
 
@@ -278,42 +301,33 @@ public class baseMap : MonoBehaviour
         player.SetSpawn(pos, player.transform.rotation);
     }
 
+    // what a world position is standing in: a role name, "Room", "Corridor", or null outside the map
+    public string AreaNameAt(Vector3 worldPos)
+    {
+        if (Layout == null) return null;
+        Vector3 local = transform.InverseTransformPoint(worldPos) / cellSize;
+        var cell = new Vector2Int(Mathf.FloorToInt(local.x), Mathf.FloorToInt(local.z));
+        if (!Layout.IsFloor(cell.x, cell.y)) return null;
+
+        // rooms win over corridors, since corridor cells inside a room are part of it
+        for (int r = 0; r < Layout.rooms.Count; r++)
+            if (Layout.rooms[r].Contains(cell)) return Plan.FullName(r) ?? "Room";
+        return "Corridor";
+    }
+
     // 2D OVERLAY FOR MAP VIEW IN PLAY MODE
 
     void RebuildOverlayTexture()
     {
-        // one texture pixel per grid cell, scaled up on screen with point filtering
         int w = Layout.width, h = Layout.height;
-        if (overlayTexture == null || overlayTexture.width != w || overlayTexture.height != h)
-        {
-            // map size changed, so the old texture can't be reused
-            if (overlayTexture != null) SafeDestroy(overlayTexture);
-            overlayTexture = new Texture2D(w, h, TextureFormat.RGBA32, false)
-            {
-                filterMode = FilterMode.Point,   // crisp pixels instead of blur
-                wrapMode = TextureWrapMode.Clamp
-            };
-        }
+        EnsureOverlayTexture(w, h);
 
         // start with a dark background everywhere
         var pixels = new Color[w * h];
         for (int i = 0; i < pixels.Length; i++) pixels[i] = BackgroundColor;
 
-        // outline each leaf partition: top and bottom rows, then left and right columns
-        foreach (var leaf in Layout.leaves)
-        {
-            var b = leaf.bounds;
-            for (int x = b.xMin; x < b.xMax; x++)
-            {
-                pixels[b.yMin * w + x] = PartitionColor;
-                pixels[(b.yMax - 1) * w + x] = PartitionColor;
-            }
-            for (int y = b.yMin; y < b.yMax; y++)
-            {
-                pixels[y * w + b.xMin] = PartitionColor;
-                pixels[y * w + b.xMax - 1] = PartitionColor;
-            }
-        }
+        // outline each leaf partition, then paint floor cells over them, then tint rooms by role
+        foreach (var leaf in Layout.leaves) PaintOutline(pixels, w, leaf.bounds, PartitionColor);
 
         // the cell grid and pixel array share the same y * width + x indexing, so copy straight across
         for (int i = 0; i < pixels.Length; i++)
@@ -322,9 +336,63 @@ public class baseMap : MonoBehaviour
             else if (Layout.cells[i] == CellType.Corridor) pixels[i] = CorridorColor;
         }
 
+        // repaint each room in its role color (rooms without a role keep the plain room color)
+        for (int r = 0; r < Layout.rooms.Count; r++)
+            PaintRect(pixels, w, Layout.rooms[r], RoomColorFor(r));
+
         overlayTexture.SetPixels(pixels);
         overlayTexture.Apply();   // uploads the pixels to the GPU
         overlayDirty = false;
+    }
+
+    // one texture pixel per grid cell, scaled up on screen with point filtering
+    void EnsureOverlayTexture(int w, int h)
+    {
+        if (overlayTexture != null && overlayTexture.width == w && overlayTexture.height == h) return;
+
+        // map size changed, so the old texture can't be reused
+        if (overlayTexture != null) SafeDestroy(overlayTexture);
+        overlayTexture = new Texture2D(w, h, TextureFormat.RGBA32, false)
+        {
+            filterMode = FilterMode.Point,   // crisp pixels instead of blur
+            wrapMode = TextureWrapMode.Clamp
+        };
+    }
+
+    // top and bottom rows, then left and right columns
+    static void PaintOutline(Color[] pixels, int w, RectInt b, Color color)
+    {
+        for (int x = b.xMin; x < b.xMax; x++)
+        {
+            pixels[b.yMin * w + x] = color;
+            pixels[(b.yMax - 1) * w + x] = color;
+        }
+        for (int y = b.yMin; y < b.yMax; y++)
+        {
+            pixels[y * w + b.xMin] = color;
+            pixels[y * w + b.xMax - 1] = color;
+        }
+    }
+
+    static void PaintRect(Color[] pixels, int w, RectInt r, Color color)
+    {
+        for (int y = r.yMin; y < r.yMax; y++)
+            for (int x = r.xMin; x < r.xMax; x++)
+                pixels[y * w + x] = color;
+    }
+
+    // color for a room's role, or the plain room color if it has none
+    Color RoomColorFor(int room)
+    {
+        if (Plan.roles == null) return RoomColor;
+        switch (Plan.roles[room])
+        {
+            case RoomRole.AttackerSpawn: return AttackerColor;
+            case RoomRole.DefenderSpawn: return DefenderColor;
+            case RoomRole.Mid: return MidColor;
+            case RoomRole.Site: return SiteColor;
+            default: return RoomColor;
+        }
     }
 
     void OnGUI()
@@ -341,26 +409,67 @@ public class baseMap : MonoBehaviour
         var mapRect = new Rect(Screen.width - w - margin, margin, w, h);
 
         GUI.DrawTexture(mapRect, overlayTexture);
+        DrawRoleLabels(mapRect, scale);
         DrawPlayerMarker(mapRect, scale);
+        DrawInfoBox(mapRect);
+    }
 
-        // info box under the map: seed/hash, room counts, key hints
-        var infoRect = new Rect(mapRect.x, mapRect.yMax + 4f, w, 64f);
+    // info box under the map: seed/hash, room counts, constraint result, key hints, then the temporary status line
+    void DrawInfoBox(Rect mapRect)
+    {
+        var infoRect = new Rect(mapRect.x, mapRect.yMax + 4f, mapRect.width, 84f);
         GUI.Box(infoRect, GUIContent.none);
-        GUI.Label(new Rect(infoRect.x + 6f, infoRect.y + 2f, w - 12f, 20f),
-            $"Seed {seed}   Hash {Layout.Hash:X8}");
-        GUI.Label(new Rect(infoRect.x + 6f, infoRect.y + 22f, w - 12f, 20f),
-            $"Rooms {Layout.rooms.Count}   Reachable {Layout.reachableRooms}/{Layout.rooms.Count}");
-        GUI.Label(new Rect(infoRect.x + 6f, infoRect.y + 42f, w - 12f, 20f),
-            "[M] map   [N] new seed   [R] regenerate");
+        InfoLine(infoRect, 0, $"Seed {seed}   Hash {Plan.Hash:X8}");
+        InfoLine(infoRect, 1, $"Rooms {Layout.rooms.Count}   Reachable {Layout.reachableRooms}/{Layout.rooms.Count}");
+        InfoLine(infoRect, 2, ConstraintSummary());
+        InfoLine(infoRect, 3, "[M] map   [N] new seed   [R] regenerate");
 
-        // temporary status line from N or R, hidden once its time runs out
+        // status from N or R, hidden once its time runs out
         if (statusMessage != null && Time.unscaledTime < statusUntil)
         {
-            var statusRect = new Rect(mapRect.x, infoRect.yMax + 4f, w, 24f);
+            var statusRect = new Rect(mapRect.x, infoRect.yMax + 4f, mapRect.width, 24f);
             GUI.Box(statusRect, GUIContent.none);
-            GUI.Label(new Rect(statusRect.x + 6f, statusRect.y + 2f, w - 12f, 20f), statusMessage);
+            InfoLine(statusRect, 0, statusMessage);
         }
     }
+
+    // label on a given row of a box, 20 pixels per row with a small inset from the edges
+    static void InfoLine(Rect box, int row, string text)
+    {
+        GUI.Label(new Rect(box.x + 6f, box.y + 2f + row * 20f, box.width - 12f, 20f), text);
+    }
+
+    // one line for the minimap, e.g. "Constraints OK (attempt 3)" or "Constraints: 2 failed"
+    public string ConstraintSummary()
+    {
+        if (!constraints.enabled) return "Constraints off";
+        if (!Plan.Solved) return $"Constraints: {Plan.failures.Count} failed";
+        return Plan.attempt == 0 ? "Constraints OK" : $"Constraints OK (attempt {Plan.attempt})";
+    }
+
+    // ATK, DEF, MID and site letters drawn over their rooms
+    void DrawRoleLabels(Rect mapRect, float scale)
+    {
+        for (int r = 0; r < Layout.rooms.Count; r++)
+        {
+            string label = Plan.Label(r);
+            if (label == null) continue;
+
+            // same flip as the player marker, cells go up in +Z and GUI rows go down
+            var c = Layout.rooms[r].center;
+            float px = mapRect.x + c.x * scale;
+            float py = mapRect.yMax - c.y * scale;
+            GUI.Label(new Rect(px - 16f, py - 10f, 32f, 20f), label, CenteredLabel);
+        }
+    }
+
+    // built on first use, GUI styles can only be created inside OnGUI
+    GUIStyle CenteredLabel => centeredLabel ??= new GUIStyle(GUI.skin.label)
+    {
+        alignment = TextAnchor.MiddleCenter,
+        fontStyle = FontStyle.Bold,
+        normal = { textColor = Color.black }
+    };
 
     void DrawPlayerMarker(Rect mapRect, float scale)
     {
@@ -419,18 +528,33 @@ public class baseMap : MonoBehaviour
         }
 
         // small height offsets stack corridors above partitions and rooms above corridors
-        if (drawCorridors)
-        {
-            Gizmos.color = new Color(CorridorColor.r, CorridorColor.g, CorridorColor.b, 0.6f);
-            foreach (var c in Layout.corridors)
-                DrawRectGizmo(c, 0.02f, true);
-        }
+        if (drawCorridors) DrawFilledGizmos(Layout.corridors, CorridorColor, 0.02f);
+        if (drawRooms) DrawRoomGizmos();
+    }
 
-        if (drawRooms)
+    // rooms in their role colors, with the role written above each one in the editor
+    void DrawRoomGizmos()
+    {
+        for (int r = 0; r < Layout.rooms.Count; r++)
         {
-            Gizmos.color = new Color(RoomColor.r, RoomColor.g, RoomColor.b, 0.6f);
-            foreach (var r in Layout.rooms)
-                DrawRectGizmo(r, 0.03f, true);
+            var color = RoomColorFor(r);
+            Gizmos.color = new Color(color.r, color.g, color.b, 0.6f);
+            DrawRectGizmo(Layout.rooms[r], 0.03f, true);
+
+#if UNITY_EDITOR
+            // Handles draws text in world space, so convert the room center first
+            string label = Plan.Label(r);
+            var c = Layout.rooms[r].center;
+            if (label != null) Handles.Label(CellToWorld(c.x, c.y) + Vector3.up * 0.5f, label);
+#endif
         }
+    }
+
+    // solid, semi-transparent rects all in one color
+    void DrawFilledGizmos(List<RectInt> rects, Color color, float yOffset)
+    {
+        Gizmos.color = new Color(color.r, color.g, color.b, 0.6f);
+        foreach (var r in rects)
+            DrawRectGizmo(r, yOffset, true);
     }
 }

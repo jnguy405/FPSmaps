@@ -68,6 +68,8 @@ public class BSPLayout
     public readonly List<BSPNode> leaves = new List<BSPNode>();
     public readonly List<RectInt> rooms = new List<RectInt>();
     public readonly List<RectInt> corridors = new List<RectInt>();   // straight segments, two per L-shaped corridor
+    public readonly List<Vector2Int> connections = new List<Vector2Int>();   // room index pairs joined by a corridor
+    public readonly List<BSPNode> roomLeaves = new List<BSPNode>();   // leaf each room sits in, same order as rooms
 
     // cell grid the 3D build reads from, row-major (index = y * width + x)
     public int width, height;
@@ -76,16 +78,50 @@ public class BSPLayout
     // rooms reachable by walking from the first room (should equal rooms.Count)
     public int reachableRooms;
 
+    // position in the cells array for grid cell (x, y)
+    public int Index(int x, int y) => y * width + x;
+
     // out-of-bounds reads count as empty so callers can check neighbors without bounds checks
     public CellType GetCell(int x, int y)
     {
         if (x < 0 || y < 0 || x >= width || y >= height) return CellType.Empty;
-        return cells[y * width + x];
+        return cells[Index(x, y)];
     }
 
     public bool IsFloor(int x, int y) => GetCell(x, y) != CellType.Empty;
 
+    // every room or corridor cell, row by row from the bottom
+    public IEnumerable<Vector2Int> FloorCells()
+    {
+        for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+                if (IsFloor(x, y)) yield return new Vector2Int(x, y);
+    }
+
     public bool AllRoomsReachable => reachableRooms == rooms.Count;
+
+    // how many corridors start or end at this room
+    public int Degree(int room)
+    {
+        int count = 0;
+        foreach (var c in connections)
+            if (c.x == room || c.y == room) count++;
+        return count;
+    }
+
+    // replaces a room's rect, keeping its leaf in sync (call BSPGenerator.Bake afterwards)
+    public void SetRoom(int room, RectInt rect)
+    {
+        rooms[room] = rect;
+        roomLeaves[room].room = rect;
+    }
+
+    public bool AreConnected(int a, int b)
+    {
+        foreach (var c in connections)
+            if ((c.x == a && c.y == b) || (c.x == b && c.y == a)) return true;
+        return false;
+    }
 
     // fingerprint of the rooms and corridors
     // same seed + settings must give the same hash
@@ -128,7 +164,7 @@ public static class BSPGenerator
 
         // one rng for the whole run, every step below must use it in the same order to stay deterministic
         var rng = new System.Random(seed);
-        var layout = new BSPLayout { seed = seed };
+        var layout = new BSPLayout { seed = seed, width = settings.width, height = settings.height };
 
         // step 1: split the whole map into partitions
         layout.root = new BSPNode { bounds = new RectInt(0, 0, settings.width, settings.height) };
@@ -138,13 +174,15 @@ public static class BSPGenerator
         foreach (var leaf in layout.leaves)
         {
             if (TryPlaceRoom(leaf, rng, settings))
+            {
                 layout.rooms.Add(leaf.room);
+                layout.roomLeaves.Add(leaf);
+            }
         }
 
         // step 3: connect rooms, bake everything into the cell grid, then verify it
         ConnectRooms(layout.root, rng, settings, layout);
-        Rasterize(layout, settings);
-        layout.reachableRooms = CountReachableRooms(layout);
+        Bake(layout);
         return layout;
     }
 
@@ -159,9 +197,18 @@ public static class BSPGenerator
             return;
         }
 
-        // cut is measured from the partition's left (vertical) or bottom (horizontal) edge
-        var b = node.bounds;
-        RectInt a, c;
+        SplitRect(node.bounds, vertical, cut, out RectInt a, out RectInt c);
+
+        // recurse into both halves, left first so the order is always the same
+        node.left = new BSPNode { bounds = a, depth = node.depth + 1 };
+        node.right = new BSPNode { bounds = c, depth = node.depth + 1 };
+        Split(node.left, rng, s, layout);
+        Split(node.right, rng, s, layout);
+    }
+
+    // cut is measured from the rect's left (vertical) or bottom (horizontal) edge
+    static void SplitRect(RectInt b, bool vertical, int cut, out RectInt a, out RectInt c)
+    {
         if (vertical)
         {
             a = new RectInt(b.x, b.y, cut, b.height);                 // left half
@@ -172,12 +219,6 @@ public static class BSPGenerator
             a = new RectInt(b.x, b.y, b.width, cut);                  // bottom half
             c = new RectInt(b.x, b.y + cut, b.width, b.height - cut); // top half
         }
-
-        // recurse into both halves, left first so the order is always the same
-        node.left = new BSPNode { bounds = a, depth = node.depth + 1 };
-        node.right = new BSPNode { bounds = c, depth = node.depth + 1 };
-        Split(node.left, rng, s, layout);
-        Split(node.right, rng, s, layout);
     }
 
     // vertical = cut along X (left/right halves); otherwise cut along Y (bottom/top halves)
@@ -253,8 +294,25 @@ public static class BSPGenerator
         if (a.Count == 0 || b.Count == 0) return;
 
         // join the closest pair of rooms so corridors stay short
-        // compare every room on the left with every room on the right
-        RectInt bestA = a[0], bestB = b[0];
+        FindClosestPair(a, b, out RectInt bestA, out RectInt bestB);
+
+        // coin flip picks which way the L bends
+        ConnectPair(layout, layout.rooms.IndexOf(bestA), layout.rooms.IndexOf(bestB), rng.NextDouble() < 0.5, s.corridorWidth);
+    }
+
+    // joins two rooms (by index) with an L-shaped corridor and records the connection
+    // also used by the constraint solver to add loops after generation, call Bake afterwards
+    public static void ConnectPair(BSPLayout layout, int a, int b, bool horizontalFirst, int width)
+    {
+        AddCorridor(CorridorAnchor(layout.rooms[a], width), CorridorAnchor(layout.rooms[b], width), horizontalFirst, width, layout);
+        layout.connections.Add(new Vector2Int(a, b));
+    }
+
+    // compares every room in a with every room in b, keeps the pair whose centers are nearest
+    static void FindClosestPair(List<RectInt> a, List<RectInt> b, out RectInt bestA, out RectInt bestB)
+    {
+        bestA = a[0];
+        bestB = b[0];
         float bestDist = float.MaxValue;
         foreach (var ra in a)
         {
@@ -270,10 +328,6 @@ public static class BSPGenerator
                 }
             }
         }
-
-        // coin flip picks which way the L bends
-        int w = s.corridorWidth;
-        AddCorridor(CorridorAnchor(bestA, w), CorridorAnchor(bestB, w), rng.NextDouble() < 0.5, w, layout);
     }
 
     // gathers every room in a subtree, left to right
@@ -294,6 +348,9 @@ public static class BSPGenerator
         return new Vector2Int(room.x + (room.width - w) / 2, room.y + (room.height - w) / 2);
     }
 
+    // the single cell in the middle of a room
+    public static Vector2Int RoomCenterCell(RectInt room) => CorridorAnchor(room, 1);
+
     // L-shaped corridor: a to the corner, then the corner to b
     static void AddCorridor(Vector2Int a, Vector2Int b, bool horizontalFirst, int w, BSPLayout layout)
     {
@@ -312,16 +369,16 @@ public static class BSPGenerator
         return new RectInt(x, y, Mathf.Abs(p.x - q.x) + w, Mathf.Abs(p.y - q.y) + w);
     }
 
-    // paints rooms and corridors into the cell grid
-    static void Rasterize(BSPLayout layout, BSPSettings s)
+    // paints rooms and corridors into the cell grid, then re-checks reachability
+    // call again after adding corridors so the grid matches
+    public static void Bake(BSPLayout layout)
     {
-        layout.width = s.width;
-        layout.height = s.height;
-        layout.cells = new CellType[s.width * s.height];   // starts all Empty
+        layout.cells = new CellType[layout.width * layout.height];   // starts all Empty
 
         // corridors first, then rooms on top, so overlapping cells end up marked as Room
         foreach (var c in layout.corridors) Fill(layout, c, CellType.Corridor);
         foreach (var r in layout.rooms) Fill(layout, r, CellType.Room);
+        layout.reachableRooms = CountReachableRooms(layout);
     }
 
     static void Fill(BSPLayout layout, RectInt r, CellType type)
@@ -331,20 +388,32 @@ public static class BSPGenerator
         int yMin = Mathf.Max(r.yMin, 0), yMax = Mathf.Min(r.yMax, layout.height);
         for (int y = yMin; y < yMax; y++)
             for (int x = xMin; x < xMax; x++)
-                layout.cells[y * layout.width + x] = type;
+                layout.cells[layout.Index(x, y)] = type;
     }
 
     // flood fill over floor cells from the first room, then count the rooms it touched
     static int CountReachableRooms(BSPLayout layout)
     {
         if (layout.rooms.Count == 0) return 0;
+        var dist = DistanceField(layout, RoomCenterCell(layout.rooms[0]));
 
-        // breadth-first search starting from the middle of room 0
-        int w = layout.width;
-        var visited = new bool[layout.cells.Length];
+        // a room counts as reachable if the fill reached its middle cell
+        int count = 0;
+        foreach (var r in layout.rooms)
+        {
+            var c = RoomCenterCell(r);
+            if (dist[layout.Index(c.x, c.y)] >= 0) count++;
+        }
+        return count;
+    }
+
+    // breadth-first search over floor cells: walking distance in cells from start, -1 where unreachable
+    public static int[] DistanceField(BSPLayout layout, Vector2Int start)
+    {
+        var dist = new int[layout.cells.Length];
+        for (int k = 0; k < dist.Length; k++) dist[k] = -1;
         var queue = new Queue<Vector2Int>();
-        var start = CorridorAnchor(layout.rooms[0], 1);
-        visited[start.y * w + start.x] = true;
+        dist[layout.Index(start.x, start.y)] = 0;
         queue.Enqueue(start);
 
         // 4-way movement only, matching how walls are built (no diagonal squeezing)
@@ -358,20 +427,14 @@ public static class BSPGenerator
 
                 // skip walls/out of bounds and cells already queued
                 if (!layout.IsFloor(next.x, next.y)) continue;
-                int i = next.y * w + next.x;
-                if (visited[i]) continue;
-                visited[i] = true;
+                int i = layout.Index(next.x, next.y);
+                if (dist[i] >= 0) continue;
+
+                // BFS reaches each cell by the shortest route first, so one step further than its parent
+                dist[i] = dist[layout.Index(cell.x, cell.y)] + 1;
                 queue.Enqueue(next);
             }
         }
-
-        // a room counts as reachable if the fill reached its middle cell
-        int count = 0;
-        foreach (var r in layout.rooms)
-        {
-            var c = CorridorAnchor(r, 1);
-            if (visited[c.y * w + c.x]) count++;
-        }
-        return count;
+        return dist;
     }
 }

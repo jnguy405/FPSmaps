@@ -23,25 +23,22 @@ public static class MapMeshBuilder
     {
         var data = new MeshData();
 
-        // grid y maps to world z, so walk every cell row by row
-        for (int z = 0; z < layout.height; z++)
+        // walls only grow from floor cells, empty cells have nothing to enclose
+        foreach (var cell in layout.FloorCells())
         {
-            for (int x = 0; x < layout.width; x++)
-            {
-                // walls only grow from floor cells, empty cells have nothing to enclose
-                if (!layout.IsFloor(x, z)) continue;
+            // grid y maps to world z
+            int x = cell.x, z = cell.y;
 
-                // world-space corners of this cell
-                float x0 = x * cellSize, x1 = (x + 1) * cellSize;
-                float z0 = z * cellSize, z1 = (z + 1) * cellSize;
+            // world-space corners of this cell
+            float x0 = x * cellSize, x1 = (x + 1) * cellSize;
+            float z0 = z * cellSize, z1 = (z + 1) * cellSize;
 
-                // each side bordering empty space gets a wall facing back into this cell
-                // IsFloor returns false outside the grid, so the map edge is walled off too
-                if (!layout.IsFloor(x - 1, z)) AddWall(data, new Vector3(x0, 0f, z0), new Vector3(x0, 0f, z1), Vector3.right, height, uvScale);     // west side
-                if (!layout.IsFloor(x + 1, z)) AddWall(data, new Vector3(x1, 0f, z0), new Vector3(x1, 0f, z1), Vector3.left, height, uvScale);      // east side
-                if (!layout.IsFloor(x, z - 1)) AddWall(data, new Vector3(x0, 0f, z0), new Vector3(x1, 0f, z0), Vector3.forward, height, uvScale);   // south side
-                if (!layout.IsFloor(x, z + 1)) AddWall(data, new Vector3(x0, 0f, z1), new Vector3(x1, 0f, z1), Vector3.back, height, uvScale);      // north side
-            }
+            // each side bordering empty space gets a wall facing back into this cell
+            // IsFloor returns false outside the grid, so the map edge is walled off too
+            if (!layout.IsFloor(x - 1, z)) AddWall(data, new Vector3(x0, 0f, z0), new Vector3(x0, 0f, z1), Vector3.right, height, uvScale);     // west side
+            if (!layout.IsFloor(x + 1, z)) AddWall(data, new Vector3(x1, 0f, z0), new Vector3(x1, 0f, z1), Vector3.left, height, uvScale);      // east side
+            if (!layout.IsFloor(x, z - 1)) AddWall(data, new Vector3(x0, 0f, z0), new Vector3(x1, 0f, z0), Vector3.forward, height, uvScale);   // south side
+            if (!layout.IsFloor(x, z + 1)) AddWall(data, new Vector3(x0, 0f, z1), new Vector3(x1, 0f, z1), Vector3.back, height, uvScale);      // north side
         }
         data.Apply(mesh);
     }
@@ -52,25 +49,20 @@ public static class MapMeshBuilder
         var data = new MeshData();
         var normal = faceUp ? Vector3.up : Vector3.down;
 
-        for (int z = 0; z < layout.height; z++)
+        // rooms and corridors both count as floor, empty cells are skipped
+        foreach (var cell in layout.FloorCells())
         {
-            for (int x = 0; x < layout.width; x++)
-            {
-                // rooms and corridors both count as floor, empty cells are skipped
-                if (!layout.IsFloor(x, z)) continue;
+            // cell corners going around: a bottom-left, b top-left, c top-right, d bottom-right (seen from above)
+            float x0 = cell.x * cellSize, x1 = (cell.x + 1) * cellSize;
+            float z0 = cell.y * cellSize, z1 = (cell.y + 1) * cellSize;
+            var a = new Vector3(x0, y, z0);
+            var b = new Vector3(x0, y, z1);
+            var c = new Vector3(x1, y, z1);
+            var d = new Vector3(x1, y, z0);
 
-                // cell corners going around: a bottom-left, b top-left, c top-right, d bottom-right (seen from above)
-                float x0 = x * cellSize, x1 = (x + 1) * cellSize;
-                float z0 = z * cellSize, z1 = (z + 1) * cellSize;
-                var a = new Vector3(x0, y, z0);
-                var b = new Vector3(x0, y, z1);
-                var c = new Vector3(x1, y, z1);
-                var d = new Vector3(x1, y, z0);
-
-                // clockwise seen from above faces up; reversed faces down
-                if (faceUp) data.AddQuad(a, b, c, d, normal, TopUV(a, uvScale), TopUV(b, uvScale), TopUV(c, uvScale), TopUV(d, uvScale));
-                else data.AddQuad(a, d, c, b, normal, TopUV(a, uvScale), TopUV(d, uvScale), TopUV(c, uvScale), TopUV(b, uvScale));
-            }
+            // clockwise seen from above faces up; reversed faces down
+            if (faceUp) data.AddQuad(a, b, c, d, normal, TopUV(a, uvScale), TopUV(b, uvScale), TopUV(c, uvScale), TopUV(d, uvScale));
+            else data.AddQuad(a, d, c, b, normal, TopUV(a, uvScale), TopUV(d, uvScale), TopUV(c, uvScale), TopUV(b, uvScale));
         }
         data.Apply(mesh);
     }

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -19,8 +20,18 @@ public class BaseMapEditor : Editor
             var layout = map.Layout;
             EditorGUILayout.HelpBox(
                 $"Rooms: {layout.rooms.Count}   Partitions: {layout.leaves.Count}   Corridors: {layout.corridors.Count / 2}\n" +
-                $"Reachable: {layout.reachableRooms}/{layout.rooms.Count}   Hash: {layout.Hash:X8}",
+                $"Reachable: {layout.reachableRooms}/{layout.rooms.Count}   Hash: {map.Plan.Hash:X8}",
                 layout.AllRoomsReachable ? MessageType.None : MessageType.Warning);
+
+            // constraint result: distances for every role, then any rule that was broken
+            var plan = map.Plan;
+            if (map.constraints.enabled)
+            {
+                var lines = new List<string> { map.ConstraintSummary() };
+                lines.AddRange(plan.report);
+                foreach (var f in plan.failures) lines.Add("FAILED: " + f);
+                EditorGUILayout.HelpBox(string.Join("\n", lines), plan.Solved ? MessageType.Info : MessageType.Warning);
+            }
         }
 
         // one row of three buttons
@@ -58,46 +69,60 @@ public static class PlayModeSeedKeeper
 
     static void OnPlayModeChanged(PlayModeStateChange state)
     {
-        if (state == PlayModeStateChange.ExitingPlayMode)
+        if (state == PlayModeStateChange.ExitingPlayMode) SaveSeeds();
+        else if (state == PlayModeStateChange.EnteredEditMode) RestoreSeeds();
+    }
+
+    // saved as "path=seed" lines, keyed by hierarchy path since play mode objects are copies
+    // SessionState survives the switch back to edit mode, regular fields don't
+    static void SaveSeeds()
+    {
+        var lines = new System.Text.StringBuilder();
+        foreach (var map in Object.FindObjectsByType<baseMap>())
         {
-            // saved as "path=seed" lines, keyed by hierarchy path since play mode objects are copies
-            // SessionState survives the switch back to edit mode, regular fields don't
-            var lines = new System.Text.StringBuilder();
-            foreach (var map in Object.FindObjectsByType<baseMap>())
-            {
-                if (map.keepPlayModeSeed)
-                    lines.Append(HierarchyPath(map.transform)).Append('=').Append(map.seed).Append('\n');
-            }
-            SessionState.SetString(Key, lines.ToString());
+            if (map.keepPlayModeSeed)
+                lines.Append(HierarchyPath(map.transform)).Append('=').Append(map.seed).Append('\n');
         }
-        else if (state == PlayModeStateChange.EnteredEditMode)
+        SessionState.SetString(Key, lines.ToString());
+    }
+
+    static void RestoreSeeds()
+    {
+        // read once and clear, so an old seed can't be applied twice
+        var seeds = ParseSeeds(SessionState.GetString(Key, ""));
+        SessionState.EraseString(Key);
+
+        // match each edit-mode map to its saved seed by hierarchy path
+        foreach (var map in Object.FindObjectsByType<baseMap>())
         {
-            // read once and clear, so an old seed can't be applied twice
-            string saved = SessionState.GetString(Key, "");
-            SessionState.EraseString(Key);
-            if (saved.Length == 0) return;
-
-            // match each edit-mode map to its saved line by hierarchy path
-            foreach (var map in Object.FindObjectsByType<baseMap>())
-            {
-                string path = HierarchyPath(map.transform) + "=";
-                foreach (var line in saved.Split('\n'))
-                {
-                    if (!line.StartsWith(path) || !int.TryParse(line.Substring(path.Length), out int seed)) continue;
-
-                    // seed didn't change during play, nothing to do
-                    if (seed == map.seed) break;
-
-                    // undoable, and marks the scene as changed so it can be saved
-                    Undo.RecordObject(map, "Keep Play Mode Seed");
-                    map.Generate(seed);
-                    EditorUtility.SetDirty(map);
-                    EditorSceneManager.MarkSceneDirty(map.gameObject.scene);
-                    Debug.Log($"[FPSmaps] Kept seed {seed} from Play mode on {map.name}.");
-                    break;
-                }
-            }
+            // skip maps with nothing saved, or whose seed didn't change during play
+            if (!seeds.TryGetValue(HierarchyPath(map.transform), out int seed) || seed == map.seed) continue;
+            ApplySeed(map, seed);
         }
+    }
+
+    // turns "path=seed" lines back into a lookup, skipping anything that doesn't parse
+    static Dictionary<string, int> ParseSeeds(string saved)
+    {
+        var seeds = new Dictionary<string, int>();
+        foreach (var line in saved.Split('\n'))
+        {
+            // split on the last '=' in case an object name contains one
+            int eq = line.LastIndexOf('=');
+            if (eq > 0 && int.TryParse(line.Substring(eq + 1), out int seed))
+                seeds[line.Substring(0, eq)] = seed;
+        }
+        return seeds;
+    }
+
+    // undoable, and marks the scene as changed so it can be saved
+    static void ApplySeed(baseMap map, int seed)
+    {
+        Undo.RecordObject(map, "Keep Play Mode Seed");
+        map.Generate(seed);
+        EditorUtility.SetDirty(map);
+        EditorSceneManager.MarkSceneDirty(map.gameObject.scene);
+        Debug.Log($"[FPSmaps] Kept seed {seed} from Play mode on {map.name}.");
     }
 
     // BSP Map walks up the parents and prepends each name
