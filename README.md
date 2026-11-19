@@ -38,6 +38,8 @@ A seeded procedural map generator for first-person levels, built in Unity for CM
 | File | Purpose |
 | --- | --- |
 | `Assets/Scripts/BSPGenerator.cs` | BSP split, room placement, corridors, cell grid and reachability check |
+| `CONSTRAINTS.md` | How the constraint rules are set, checked and changed |
+| `DEVLOG.md` | Dated history of the project, commit by commit |
 | `Assets/Scripts/Constraints/MapConstraints.cs` | Constraint settings, room roles and the solved map plan |
 | `Assets/Scripts/Constraints/MapConstraintSolver.cs` | Runs the solve (orientation, repair, entrances, validation) and holds the shared helpers |
 | `Assets/Scripts/Constraints/SpawnConstraints.cs` | Spawn rules: fixed size on the edge middle, left and right exits |
