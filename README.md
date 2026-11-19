@@ -38,7 +38,11 @@ A seeded procedural map generator for first-person levels, built in Unity for CM
 | File | Purpose |
 | --- | --- |
 | `Assets/Scripts/BSPGenerator.cs` | BSP split, room placement, corridors, cell grid and reachability check |
-| `Assets/Scripts/MapConstraintSolver.cs` | Assigns spawns, mid and sites, grows rooms to fit, adds site entrances and checks the rules |
+| `Assets/Scripts/Constraints/MapConstraints.cs` | Constraint settings, room roles and the solved map plan |
+| `Assets/Scripts/Constraints/MapConstraintSolver.cs` | Runs the solve (orientation, repair, entrances, validation) and holds the shared helpers |
+| `Assets/Scripts/Constraints/SpawnConstraints.cs` | Spawn rules: fixed size on the edge middle, left and right exits |
+| `Assets/Scripts/Constraints/MidConstraints.cs` | Mid rules: biggest room over the center, spawn gaps, a route in from each team |
+| `Assets/Scripts/Constraints/SiteConstraints.cs` | Site rules: picking A/B/C by position, walk balance, defender share, entrances |
 | `Assets/Scripts/MapMeshBuilder.cs` | Turns the cell grid into floor, wall and ceiling meshes |
 | `Assets/Scripts/MapUI.cs` | In-game generator panel, crosshair and the current-area label |
 | `Assets/Scripts/DesignerCamera.cs` | Overhead orbit camera for viewing the whole map |

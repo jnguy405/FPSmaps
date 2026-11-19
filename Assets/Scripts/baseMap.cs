@@ -542,8 +542,7 @@ public class baseMap : MonoBehaviour
         line.y += 20f;
         GUI.Label(line, $"{Layout.rooms.Count} rooms, {Layout.reachableRooms} reachable", MapStyle.Small);
         line.y += 18f;
-        bool ok = !constraints.enabled || Plan.Solved;
-        GUI.Label(line, ConstraintSummary(), ok ? MapStyle.OkLabel : MapStyle.FailLabel);
+        GUI.Label(line, ConstraintSummary(), MapStyle.OkLabel);
         line.y += 24f;
         DrawLegend(line);
         line.y += 22f;
@@ -578,12 +577,12 @@ public class baseMap : MonoBehaviour
     // right-aligned copy of a style, built once on first use
     GUIStyle RightAligned(GUIStyle source) => rightAligned ??= new GUIStyle(source) { alignment = TextAnchor.UpperRight };
 
-    // one line for the minimap, e.g. "Constraints OK (attempt 3)" or "Constraints: 2 failed"
+    // one line for the minimap, e.g. "Constraints on" or "Constraints on (attempt 3)"
+    // broken rules are only used by the solver to pick between attempts, they aren't shown
     public string ConstraintSummary()
     {
         if (!constraints.enabled) return "Constraints off";
-        if (!Plan.Solved) return $"Constraints: {Plan.failures.Count} failed";
-        return Plan.attempt == 0 ? "Constraints OK" : $"Constraints OK (attempt {Plan.attempt})";
+        return Plan.attempt == 0 ? "Constraints on" : $"Constraints on (attempt {Plan.attempt})";
     }
 
     // ATK, DEF, MID and site letters drawn over their rooms
@@ -612,7 +611,7 @@ public class baseMap : MonoBehaviour
 
         var p = CellToMinimap(mapRect, scale, WorldToCell(player.transform.position));
 
-        // don't draw the dot when the player is outside the map (e.g. in the test room)
+        // don't draw the dot when the player is outside the map
         if (!mapRect.Contains(p)) return;
 
         // dark outline first, then the dot, so it shows up on every floor color

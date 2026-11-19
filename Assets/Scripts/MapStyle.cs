@@ -11,7 +11,6 @@ public static class MapStyle
     public static readonly Color MutedColor = new Color(0.6f, 0.63f, 0.68f);
     public static readonly Color AccentColor = new Color(0.98f, 0.76f, 0.3f);
     public static readonly Color OkColor = new Color(0.45f, 0.88f, 0.5f);
-    public static readonly Color FailColor = new Color(1f, 0.52f, 0.44f);
     static readonly Color ButtonColor = new Color(0.17f, 0.19f, 0.23f, 1f);
     static readonly Color ButtonHoverColor = new Color(0.24f, 0.27f, 0.32f, 1f);
     static readonly Color ButtonActiveColor = new Color(0.12f, 0.13f, 0.16f, 1f);
@@ -44,7 +43,7 @@ public static class MapStyle
 
     // STYLES
 
-    public static GUIStyle PanelBox, Title, Header, Label, Small, OkLabel, FailLabel;
+    public static GUIStyle PanelBox, Title, Header, Label, Small, OkLabel;
     public static GUIStyle Button, AccentButton, MapLabel, Area;
 
     static Texture2D panelTex, buttonTex, buttonHoverTex, buttonActiveTex, accentTex, accentHoverTex;
@@ -80,7 +79,6 @@ public static class MapStyle
             normal = { textColor = MutedColor }
         };
         OkLabel = new GUIStyle(Label) { fontStyle = FontStyle.Bold, normal = { textColor = OkColor } };
-        FailLabel = new GUIStyle(Label) { normal = { textColor = FailColor } };
 
         Button = new GUIStyle(GUI.skin.button)
         {

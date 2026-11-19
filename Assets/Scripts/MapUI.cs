@@ -132,11 +132,8 @@ public class MapUI : MonoBehaviour
         c.enabled = GUILayout.Toggle(c.enabled, " Use attack/defense constraints");
         if (!c.enabled) return;
 
+        // the rules themselves are fixed, only how many sites the map has is a choice
         c.siteCount = IntSlider("Sites", c.siteCount, 2, 3);
-        c.minSiteArea = IntSlider("Min site area", c.minSiteArea, 16, 144);
-        c.siteBalance = FloatSlider("Site balance", c.siteBalance, 0.05f, 0.6f);
-        c.defenderAdvantage = FloatSlider("Defender advantage", c.defenderAdvantage, 0.5f, 1f);
-        c.preferredEntrancesPerSide = IntSlider("Entrances per side", c.preferredEntrancesPerSide, 1, 3);
     }
 
     // settings that only change how the map looks, so they apply right away without a new layout
@@ -157,15 +154,12 @@ public class MapUI : MonoBehaviour
         map.showOverlay = GUILayout.Toggle(map.showOverlay, " Show minimap  [M]");
     }
 
-    // summary, every broken rule, then the distance report
+    // summary, then the distance and entrance report
     void DrawReport()
     {
-        var plan = map.Plan;
-        bool ok = !map.constraints.enabled || plan.Solved;
         GUILayout.Label("REPORT", MapStyle.Header);
-        GUILayout.Label(map.ConstraintSummary(), ok ? MapStyle.OkLabel : MapStyle.FailLabel);
-        foreach (var f in plan.failures) GUILayout.Label("• " + f, MapStyle.FailLabel);
-        foreach (var line in plan.report) GUILayout.Label(line, MapStyle.Small);
+        GUILayout.Label(map.ConstraintSummary(), MapStyle.OkLabel);
+        foreach (var line in map.Plan.report) GUILayout.Label(line, MapStyle.Small);
     }
 
     // HUD

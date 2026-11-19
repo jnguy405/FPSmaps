@@ -71,6 +71,14 @@ public class BSPLayout
     public readonly List<Vector2Int> connections = new List<Vector2Int>();   // room index pairs joined by a corridor
     public readonly List<BSPNode> roomLeaves = new List<BSPNode>();   // leaf each room sits in, same order as rooms
 
+    // where hallways leave each room: the room, the outward direction of the wall it's in,
+    // the doorway's bottom-left cell (the opening is corridor width square, just inside that wall),
+    // and which connection the hallway belongs to
+    public readonly List<(int room, Vector2Int wall, Vector2Int cell, int link)> doors = new List<(int, Vector2Int, Vector2Int, int)>();
+
+    // the segments each connection's hallway was built from, by connection index, so one can be rerouted later
+    public readonly List<List<RectInt>> routes = new List<List<RectInt>>();
+
     // cell grid the 3D build reads from, row-major (index = y * width + x)
     public int width, height;
     public CellType[] cells;
@@ -182,9 +190,9 @@ public static class BSPGenerator
             }
         }
 
-        // step 3: connect rooms, bake everything into the cell grid, then verify it
+        // step 3: connect rooms, bake everything into the cell grid, then make sure every room is walkable
         ConnectRooms(layout.root, rng, settings, layout);
-        Bake(layout);
+        ConnectStrayRooms(layout, settings.corridorWidth);
         return layout;
     }
 
@@ -302,12 +310,234 @@ public static class BSPGenerator
         ConnectPair(layout, layout.rooms.IndexOf(bestA), layout.rooms.IndexOf(bestB), rng.NextDouble() < 0.5, s.corridorWidth);
     }
 
-    // joins two rooms (by index) with an L-shaped corridor and records the connection
-    // also used by the constraint solver to add loops after generation, call Bake afterwards
-    public static void ConnectPair(BSPLayout layout, int a, int b, bool horizontalFirst, int width)
+    // joins two rooms (by index) with a hallway and records the connection
+    // the hallway leaves each room through the wall facing the other room, at a spot clear of that room's other
+    // doors, and its route is picked to keep off other hallways and out of other rooms
+    // horizontalFirst only breaks ties between equally good routes
+    // wallA (optional) forces which wall the hallway leaves room a through, e.g. a spawn's side wall
+    // also used by the constraint solver to add entrances after generation, call Bake afterwards
+    public static void ConnectPair(BSPLayout layout, int a, int b, bool horizontalFirst, int width, Vector2Int? wallA = null)
     {
-        AddCorridor(CorridorAnchor(layout.rooms[a], width), CorridorAnchor(layout.rooms[b], width), horizontalFirst, width, layout);
         layout.connections.Add(new Vector2Int(a, b));
+        layout.routes.Add(null);
+        BuildHallway(layout, layout.connections.Count - 1, a, wallA, horizontalFirst, width);
+    }
+
+    // rebuilds an existing connection's hallway so it leaves room through the given wall,
+    // replacing its old segments and doors (stubs ReattachDoors added for the old doors are left in place)
+    public static void Reroute(BSPLayout layout, int link, int room, Vector2Int wall, int width)
+    {
+        foreach (var seg in layout.routes[link]) layout.corridors.Remove(seg);
+        layout.doors.RemoveAll(d => d.link == link);
+        BuildHallway(layout, link, room, wall, true, width);
+    }
+
+    // routes connection link's hallway from room a to the other end and records its segments and doors
+    static void BuildHallway(BSPLayout layout, int link, int a, Vector2Int? forcedWall, bool horizontalFirst, int width)
+    {
+        var c = layout.connections[link];
+        int b = c.x == a ? c.y : c.x;
+        var ra = layout.rooms[a];
+        var rb = layout.rooms[b];
+        var wallA = forcedWall ?? FacingWall(ra, rb.center);
+        var wallB = FacingWall(rb, ra.center);
+        var doorA = DoorCell(layout, a, wallA, rb.center, width);
+        var doorB = DoorCell(layout, b, wallB, ra.center, width);
+
+        var route = BestRoute(layout, a, b, doorA, wallA, doorB, wallB, horizontalFirst, width);
+        layout.corridors.AddRange(route);
+        layout.routes[link] = route;
+        layout.doors.Add((a, wallA, doorA, link));
+        layout.doors.Add((b, wallB, doorB, link));
+    }
+
+    // after a room is resized, any of its doorways left outside it get a short corridor back in,
+    // so the hallways that ended there still reach the room
+    public static void ReattachDoors(BSPLayout layout, int room, int width)
+    {
+        var r = layout.rooms[room];
+        foreach (var d in layout.doors)
+        {
+            if (d.room != room) continue;
+
+            // still at least partly inside, so still connected
+            if (r.Overlaps(new RectInt(d.cell.x, d.cell.y, width, width))) continue;
+
+            // L from the old doorway to the nearest spot just inside the room
+            var inside = new Vector2Int(Mathf.Clamp(d.cell.x, r.xMin, r.xMax - width), Mathf.Clamp(d.cell.y, r.yMin, r.yMax - width));
+            var corner = new Vector2Int(inside.x, d.cell.y);
+            layout.corridors.Add(Segment(d.cell, corner, width));
+            layout.corridors.Add(Segment(corner, inside, width));
+        }
+    }
+
+    // HALLWAY ROUTING
+
+    // outward direction of the room wall that faces a point: east (1, 0), west (-1, 0), north (0, 1) or south (0, -1)
+    static Vector2Int FacingWall(RectInt r, Vector2 toward)
+    {
+        // how far past the room's edges the point sits on each axis, 0 while it's within the room's span
+        float dx = toward.x > r.xMax ? toward.x - r.xMax : toward.x < r.xMin ? toward.x - r.xMin : 0f;
+        float dy = toward.y > r.yMax ? toward.y - r.yMax : toward.y < r.yMin ? toward.y - r.yMin : 0f;
+
+        // a point within the room's span on both axes falls back to the offset from the center
+        if (dx == 0f && dy == 0f)
+        {
+            dx = toward.x - r.center.x;
+            dy = toward.y - r.center.y;
+        }
+        if (Mathf.Abs(dx) >= Mathf.Abs(dy)) return new Vector2Int(dx >= 0f ? 1 : -1, 0);
+        return new Vector2Int(0, dy >= 0f ? 1 : -1);
+    }
+
+    // bottom-left cell of a w x w doorway just inside the given wall, as close to the target as it can sit
+    // while staying clear of the room's other doors on that wall
+    static Vector2Int DoorCell(BSPLayout layout, int room, Vector2Int wall, Vector2 toward, int w)
+    {
+        var r = layout.rooms[room];
+        bool alongY = wall.x != 0;   // east/west walls run along y, so the door slides along y
+
+        // the fixed coordinate puts the doorway flush against that wall, inside the room
+        int fixedPos = wall.x > 0 ? r.xMax - w : wall.x < 0 ? r.xMin : wall.y > 0 ? r.yMax - w : r.yMin;
+
+        // the range it can slide in, kept a cell off the corners when the wall is long enough
+        int lo = alongY ? r.yMin : r.xMin;
+        int hi = (alongY ? r.yMax : r.xMax) - w;
+        if (hi - lo >= 2) { lo++; hi--; }
+        int want = Mathf.Clamp(Mathf.RoundToInt((alongY ? toward.y : toward.x) - w / 2f), lo, hi);
+
+        // the wanted spot first, then step outward both ways until one is clear
+        // a wall with no clear spot left shares the wanted one
+        int pos = want;
+        for (int step = 0; step <= hi - lo; step++)
+        {
+            if (want + step <= hi && DoorIsClear(layout, room, wall, want + step, w)) { pos = want + step; break; }
+            if (want - step >= lo && DoorIsClear(layout, room, wall, want - step, w)) { pos = want - step; break; }
+        }
+        return alongY ? new Vector2Int(fixedPos, pos) : new Vector2Int(pos, fixedPos);
+    }
+
+    // true if a door at pos keeps at least a two-cell gap from the room's other doors on the same wall,
+    // so their hallways can't leave side by side
+    static bool DoorIsClear(BSPLayout layout, int room, Vector2Int wall, int pos, int w)
+    {
+        foreach (var d in layout.doors)
+        {
+            if (d.room != room || d.wall != wall) continue;
+            int other = wall.x != 0 ? d.cell.y : d.cell.x;
+            if (Mathf.Abs(other - pos) < w + 2) return false;
+        }
+        return true;
+    }
+
+    // best of the candidate routes between two doors:
+    // doors facing each other across a gap get a Z shape, trying every position for its middle leg,
+    // anything else gets an L shape, preferring the one that leaves room a straight out of its wall
+    static List<RectInt> BestRoute(BSPLayout layout, int a, int b, Vector2Int doorA, Vector2Int wallA,
+        Vector2Int doorB, Vector2Int wallB, bool horizontalFirst, int w)
+    {
+        List<RectInt> best = null;
+        float bestScore = float.MaxValue;
+        void Consider(List<RectInt> route, float bias)
+        {
+            float score = RouteScore(layout, a, b, route) + bias;
+            if (score < bestScore)
+            {
+                bestScore = score;
+                best = route;
+            }
+        }
+
+        bool sideways = wallA.x != 0 && wallB.x != 0;   // both doors in east/west walls
+        bool stacked = wallA.y != 0 && wallB.y != 0;    // both doors in north/south walls
+        if (sideways || stacked)
+        {
+            // out of a, across on the middle leg, into b
+            int from = sideways ? doorA.x : doorA.y, to = sideways ? doorB.x : doorB.y;
+            int middle = (from + to) / 2;
+            for (int m = Mathf.Min(from, to); m <= Mathf.Max(from, to); m++)
+            {
+                var p = sideways ? new Vector2Int(m, doorA.y) : new Vector2Int(doorA.x, m);
+                var q = sideways ? new Vector2Int(m, doorB.y) : new Vector2Int(doorB.x, m);
+
+                // a tiny pull toward the middle so equal scores make tidy, centered bends
+                Consider(new List<RectInt> { Segment(doorA, p, w), Segment(p, q, w), Segment(q, doorB, w) },
+                    0.001f * Mathf.Abs(m - middle));
+            }
+        }
+        else
+        {
+            bool outOfA = wallA.x != 0;   // a's door is in an east/west wall, so leaving straight out is horizontal
+            foreach (bool h in new[] { outOfA, !outOfA })
+            {
+                var corner = h ? new Vector2Int(doorB.x, doorA.y) : new Vector2Int(doorA.x, doorB.y);
+                float bias = (h == outOfA ? 0f : 0.5f) + (h == horizontalFirst ? 0f : 0.0001f);
+                Consider(new List<RectInt> { Segment(doorA, corner, w), Segment(corner, doorB, w) }, bias);
+            }
+        }
+        return best;
+    }
+
+    // lower is better: 10 for every other room a segment runs through (that would open an unplanned doorway),
+    // 1 for every existing hallway it touches or crosses outside the two rooms it joins
+    static float RouteScore(BSPLayout layout, int a, int b, List<RectInt> route)
+    {
+        var ra = layout.rooms[a];
+        var rb = layout.rooms[b];
+        float score = 0f;
+        foreach (var seg in route)
+        {
+            for (int i = 0; i < layout.rooms.Count; i++)
+                if (i != a && i != b && layout.rooms[i].Overlaps(seg)) score += 10f;
+
+            // one cell of margin, so running right alongside a hallway counts the same as crossing it
+            var near = new RectInt(seg.x - 1, seg.y - 1, seg.width + 2, seg.height + 2);
+            foreach (var c in layout.corridors)
+            {
+                if (!near.Overlaps(c)) continue;
+
+                // touching inside either of the two rooms doesn't matter, that's floor anyway
+                var shared = Intersect(near, c);
+                if (ContainsRect(ra, shared) || ContainsRect(rb, shared)) continue;
+                score += 1f;
+            }
+        }
+        return score;
+    }
+
+    static RectInt Intersect(RectInt p, RectInt q)
+    {
+        int xMin = Mathf.Max(p.xMin, q.xMin), yMin = Mathf.Max(p.yMin, q.yMin);
+        int xMax = Mathf.Min(p.xMax, q.xMax), yMax = Mathf.Min(p.yMax, q.yMax);
+        return new RectInt(xMin, yMin, xMax - xMin, yMax - yMin);
+    }
+
+    static bool ContainsRect(RectInt outer, RectInt inner)
+    {
+        return inner.xMin >= outer.xMin && inner.yMin >= outer.yMin && inner.xMax <= outer.xMax && inner.yMax <= outer.yMax;
+    }
+
+    // room-to-room steps from start along recorded connections, -1 where unreachable
+    // rooms in blocked are never walked through (e.g. the other team's spawn), start itself always counts
+    public static int[] RoomHops(BSPLayout layout, int start, params int[] blocked)
+    {
+        var hops = new int[layout.rooms.Count];
+        for (int i = 0; i < hops.Length; i++) hops[i] = -1;
+        hops[start] = 0;
+
+        var queue = new Queue<int>();
+        queue.Enqueue(start);
+        while (queue.Count > 0)
+        {
+            int room = queue.Dequeue();
+            foreach (var next in layout.Neighbors(room))
+            {
+                if (hops[next] >= 0 || Array.IndexOf(blocked, next) >= 0) continue;
+                hops[next] = hops[room] + 1;
+                queue.Enqueue(next);
+            }
+        }
+        return hops;
     }
 
     // compares every room in a with every room in b, keeps the pair whose centers are nearest
@@ -353,15 +583,6 @@ public static class BSPGenerator
     // the single cell in the middle of a room
     public static Vector2Int RoomCenterCell(RectInt room) => CorridorAnchor(room, 1);
 
-    // L-shaped corridor: a to the corner, then the corner to b
-    static void AddCorridor(Vector2Int a, Vector2Int b, bool horizontalFirst, int w, BSPLayout layout)
-    {
-        // horizontal first goes along x then up/down to b; otherwise along y then across
-        var corner = horizontalFirst ? new Vector2Int(b.x, a.y) : new Vector2Int(a.x, b.y);
-        layout.corridors.Add(Segment(a, corner, w));
-        layout.corridors.Add(Segment(corner, b, w));
-    }
-
     // axis-aligned strip w cells wide covering both end points
     static RectInt Segment(Vector2Int p, Vector2Int q, int w)
     {
@@ -381,6 +602,93 @@ public static class BSPGenerator
         foreach (var c in layout.corridors) Fill(layout, c, CellType.Corridor);
         foreach (var r in layout.rooms) Fill(layout, r, CellType.Room);
         layout.reachableRooms = CountReachableRooms(layout);
+    }
+
+    // safety net: bakes the grid, then gives any room the player can't actually walk to a corridor
+    // to the nearest room they can, until every room connects
+    // checked on the baked cells rather than the recorded connections, so it also catches links that
+    // broke after they were made (e.g. a room resized later)
+    // then any room left with a single hallway gets a second one, so no room is a dead end
+    // the new corridors don't need to line up with any other entrance, they just have to join the two rooms
+    // locked rooms (e.g. spawns and mid) only take a stray link if nothing else is in reach, and never a dead-end one
+    // returns how many corridors were added
+    public static int ConnectStrayRooms(BSPLayout layout, int width, params int[] locked)
+    {
+        Bake(layout);
+        int added = 0;
+        bool IsLocked(int room) => Array.IndexOf(locked, room) >= 0;
+
+        // each pass joins at least one stray room, so rooms.Count passes is always enough
+        while (!layout.AllRoomsReachable && added < layout.rooms.Count)
+        {
+            var dist = DistanceField(layout, RoomCenterCell(layout.rooms[0]));
+            bool Reached(int room)
+            {
+                var c = RoomCenterCell(layout.rooms[room]);
+                return dist[layout.Index(c.x, c.y)] >= 0;
+            }
+
+            // closest pair of one stray room and one reachable room, by center distance
+            int stray = -1, target = -1;
+            float best = float.MaxValue;
+            for (int s = 0; s < layout.rooms.Count; s++)
+            {
+                if (Reached(s)) continue;
+                for (int r = 0; r < layout.rooms.Count; r++)
+                {
+                    if (!Reached(r)) continue;
+
+                    // locked rooms sort after every unlocked one
+                    float d = (layout.rooms[s].center - layout.rooms[r].center).sqrMagnitude;
+                    if (IsLocked(r)) d += 1e7f;
+                    if (d < best)
+                    {
+                        best = d;
+                        stray = s;
+                        target = r;
+                    }
+                }
+            }
+            if (stray < 0) break;
+
+            // a new hallway between the two always joins them, wherever their other entrances are
+            ConnectPair(layout, stray, target, true, width);
+            Bake(layout);
+            added++;
+        }
+
+        // dead ends: in room order, so the result stays deterministic
+        int before = added;
+        for (int room = 0; room < layout.rooms.Count; room++)
+        {
+            if (IsLocked(room) || CountNeighbors(layout, room) >= 2) continue;
+
+            // nearest unlocked room it isn't joined to yet
+            int target = -1;
+            float best = float.MaxValue;
+            for (int r = 0; r < layout.rooms.Count; r++)
+            {
+                if (r == room || IsLocked(r) || layout.AreConnected(room, r)) continue;
+                float d = (layout.rooms[room].center - layout.rooms[r].center).sqrMagnitude;
+                if (d < best)
+                {
+                    best = d;
+                    target = r;
+                }
+            }
+            if (target < 0) continue;
+            ConnectPair(layout, room, target, true, width);
+            added++;
+        }
+        if (added > before) Bake(layout);
+        return added;
+    }
+
+    static int CountNeighbors(BSPLayout layout, int room)
+    {
+        int count = 0;
+        foreach (var _ in layout.Neighbors(room)) count++;
+        return count;
     }
 
     static void Fill(BSPLayout layout, RectInt r, CellType type)

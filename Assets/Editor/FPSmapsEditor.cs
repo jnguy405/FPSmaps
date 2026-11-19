@@ -19,18 +19,16 @@ public class BaseMapEditor : Editor
             // summary box turns into a warning if any room can't be reached
             var layout = map.Layout;
             EditorGUILayout.HelpBox(
-                $"Rooms: {layout.rooms.Count}   Partitions: {layout.leaves.Count}   Corridors: {layout.corridors.Count / 2}\n" +
+                $"Rooms: {layout.rooms.Count}   Partitions: {layout.leaves.Count}   Connections: {layout.connections.Count}\n" +
                 $"Reachable: {layout.reachableRooms}/{layout.rooms.Count}   Hash: {map.Plan.Hash:X8}",
                 layout.AllRoomsReachable ? MessageType.None : MessageType.Warning);
 
-            // constraint result: distances for every role, then any rule that was broken
-            var plan = map.Plan;
+            // constraint result: distances and entrances for every role
             if (map.constraints.enabled)
             {
                 var lines = new List<string> { map.ConstraintSummary() };
-                lines.AddRange(plan.report);
-                foreach (var f in plan.failures) lines.Add("FAILED: " + f);
-                EditorGUILayout.HelpBox(string.Join("\n", lines), plan.Solved ? MessageType.Info : MessageType.Warning);
+                lines.AddRange(map.Plan.report);
+                EditorGUILayout.HelpBox(string.Join("\n", lines), MessageType.Info);
             }
         }
 
@@ -134,7 +132,7 @@ public static class PlayModeSeedKeeper
     }
 }
 
-// FPSmaps > Build Test Scene: hand-built cube room, FPS player, and the BSP map object
+// FPSmaps > Build Test Scene: the FPS player and the BSP map object
 public static class FPSmapsSceneSetup
 {
     const string MaterialFolder = "Assets/Materials";
@@ -143,6 +141,7 @@ public static class FPSmapsSceneSetup
     public static void BuildTestScene()
     {
         // remove anything left from a previous run so the menu can be used again safely
+        // (Test Room is the old hand-built room, cleared out of scenes made before it was dropped)
         foreach (var name in new[] { "Test Room", "Player", "BSP Map" })
         {
             var existing = GameObject.Find(name);
@@ -152,14 +151,11 @@ public static class FPSmapsSceneSetup
         // flat colors for now, textures can be swapped into these assets later
         var floorMat = GetOrCreateMaterial("Floor", new Color(0.45f, 0.45f, 0.48f));
         var wallMat = GetOrCreateMaterial("Wall", new Color(0.75f, 0.73f, 0.7f));
-        var propMat = GetOrCreateMaterial("Prop", new Color(0.85f, 0.5f, 0.2f));
 
-        BuildRoom(floorMat, wallMat, propMat);
-        BuildPlayer(new Vector3(0f, 0.05f, -6f));
+        // the map moves the player into the attacker spawn on Play, so the start position only matters in edit mode
+        BuildPlayer(new Vector3(0f, 0.05f, 0f));
 
-        // map sits off to the side so it doesn't overlap the test room
         var map = new GameObject("BSP Map");
-        map.transform.position = new Vector3(20f, 0f, -32f);
         var generator = map.AddComponent<baseMap>();
         generator.floorMaterial = floorMat;
         generator.wallMaterial = wallMat;
@@ -168,51 +164,6 @@ public static class FPSmapsSceneSetup
 
         EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
         Debug.Log("[FPSmaps] Test scene built. Press Play: WASD move, Shift sprint, Space jump, M toggles the BSP map.");
-    }
-
-    static void BuildRoom(Material floorMat, Material wallMat, Material propMat)
-    {
-        var room = new GameObject("Test Room");
-        Undo.RegisterCreatedObjectUndo(room, "Create Test Room");
-        var t = room.transform;
-
-        // 20 x 20 room, 4 tall walls, 2 wide doorway (same as a 2-cell corridor)
-        const float size = 20f, half = size / 2f, wallH = 4f, wallT = 0.5f;
-        const float doorW = 2f, doorH = 2.5f;
-
-        // floor top sits at y = 0, so it's moved down by half its thickness
-        Cube("Floor", t, new Vector3(0f, -0.1f, 0f), new Vector3(size, 0.2f, size), floorMat);
-
-        // south, east, west walls are solid
-        Cube("Wall South", t, new Vector3(0f, wallH / 2f, -half), new Vector3(size, wallH, wallT), wallMat);
-        Cube("Wall East", t, new Vector3(half, wallH / 2f, 0f), new Vector3(wallT, wallH, size), wallMat);
-        Cube("Wall West", t, new Vector3(-half, wallH / 2f, 0f), new Vector3(wallT, wallH, size), wallMat);
-
-        // north wall has a doorway to test corridor-sized openings
-        // two side pieces plus a lintel above the gap
-        float segW = (size - doorW) / 2f;
-        Cube("Wall North L", t, new Vector3(-(doorW + segW) / 2f, wallH / 2f, half), new Vector3(segW, wallH, wallT), wallMat);
-        Cube("Wall North R", t, new Vector3((doorW + segW) / 2f, wallH / 2f, half), new Vector3(segW, wallH, wallT), wallMat);
-        Cube("Door Lintel", t, new Vector3(0f, (doorH + wallH) / 2f, half), new Vector3(doorW, wallH - doorH, wallT), wallMat);
-
-        // cover crates
-        // crate 3 sits on top of crate 2 to test jumping onto a stack
-        Cube("Crate 1", t, new Vector3(3f, 0.5f, 3f), Vector3.one, propMat);
-        Cube("Crate 2", t, new Vector3(-4f, 0.75f, 2f), Vector3.one * 1.5f, propMat);
-        Cube("Crate 3", t, new Vector3(-4f, 1.75f, 2f), Vector3.one * 0.5f, propMat);
-
-        // stairs (each step under the CharacterController's 0.3 step offset)
-        // every step is 0.25 taller than the last and one unit further back
-        for (int i = 0; i < 4; i++)
-        {
-            float h = 0.25f * (i + 1);
-            Cube($"Step {i + 1}", t, new Vector3(-6f, h / 2f, -3f - i), new Vector3(3f, h, 1f), propMat);
-        }
-
-        // ramp to test slopes
-        // tilted 20 degrees, under the CharacterController's default 45 degree slope limit
-        var ramp = Cube("Ramp", t, new Vector3(6f, 0.85f, -5f), new Vector3(2f, 0.2f, 5f), propMat);
-        ramp.transform.rotation = Quaternion.Euler(-20f, 0f, 0f);
     }
 
     static void BuildPlayer(Vector3 position)
@@ -246,18 +197,6 @@ public static class FPSmapsSceneSetup
 
         var fps = player.AddComponent<FirstPersonController>();
         fps.cameraPivot = cam.transform;
-    }
-
-    // creates a primitive cube with its collider, positioned and scaled in the parent's space
-    static GameObject Cube(string name, Transform parent, Vector3 position, Vector3 scale, Material mat)
-    {
-        var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        go.name = name;
-        go.transform.SetParent(parent, false);
-        go.transform.localPosition = position;
-        go.transform.localScale = scale;
-        go.GetComponent<MeshRenderer>().sharedMaterial = mat;
-        return go;
     }
 
     // loads the material if it already exists, otherwise creates and saves it
