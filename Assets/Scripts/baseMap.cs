@@ -24,13 +24,17 @@ public class baseMap : MonoBehaviour
     public bool build3D = true;
     [Tooltip("World size of one grid cell.")]
     public float cellSize = 1f;
-    public float wallHeight = 4f;
+    [Range(2f, 6f)] public float wallHeight = 3f;
     public bool buildCeiling = false;
+    [Tooltip("Solid-looking wall tops and outer faces, only visible from the designer view.")]
+    public bool buildWallBlocks = true;
     [Tooltip("Texture repeats per world unit.")]
     public float uvScale = 0.5f;
     public Material floorMaterial;
     public Material wallMaterial;
     public Material ceilingMaterial;
+    [Tooltip("How strongly spawn, mid and site floors are tinted with their role color.")]
+    [Range(0f, 1f)] public float roleTint = 0.4f;
     [Tooltip("Move the player into the attacker spawn (or the first room) on Play and on a new seed.")]
     public bool spawnPlayerInMap = true;
 
@@ -43,19 +47,10 @@ public class baseMap : MonoBehaviour
     public bool showOverlay = true;
     [Min(64)] public int overlaySize = 320;
 
-    static readonly Color BackgroundColor = new Color(0.08f, 0.08f, 0.1f, 0.9f);
-    static readonly Color PartitionColor = new Color(0.35f, 0.55f, 0.9f, 1f);
-    static readonly Color RoomColor = new Color(0.95f, 0.75f, 0.3f, 1f);
-    static readonly Color CorridorColor = new Color(0.55f, 0.85f, 0.75f, 1f);
-    static readonly Color PlayerColor = new Color(0.95f, 0.3f, 0.3f, 1f);
-
-    // role colors differ in lightness as well as hue so they stay readable on the minimap
-    static readonly Color AttackerColor = new Color(0.95f, 0.45f, 0.2f, 1f);
-    static readonly Color DefenderColor = new Color(0.25f, 0.45f, 0.95f, 1f);
-    static readonly Color MidColor = new Color(0.75f, 0.55f, 0.95f, 1f);
-    static readonly Color SiteColor = new Color(0.35f, 0.85f, 0.4f, 1f);
-
     const string GeneratedRootName = "Generated Map";
+
+    // floor submeshes, one material each: plain room, corridor, then the four roles
+    const int FloorRoom = 0, FloorCorridor = 1, FloorGroupCount = 6;
 
     // the solved map: layout plus room roles and the constraint report
     public MapPlan Plan { get; private set; }
@@ -65,11 +60,14 @@ public class baseMap : MonoBehaviour
     bool overlayDirty = true;   // set when the layout changes so the minimap redraws once
     string statusMessage;
     float statusUntil;
-    GUIStyle centeredLabel;
+    GUIStyle rightAligned;
 
-    Mesh floorMesh, wallMesh, ceilingMesh;
+    Mesh floorMesh, wallMesh, ceilingMesh, wallBlockMesh;
+    Material[] floorMaterials;      // tinted copies made at runtime, never saved
+    Material wallTopMaterial;
     FirstPersonController player;
     MapUI ui;
+    DesignerCamera designer;
 
     // runs in edit mode too (ExecuteAlways), so the map appears as soon as the scene opens
     void OnEnable()
@@ -77,12 +75,14 @@ public class baseMap : MonoBehaviour
         Generate();
     }
 
-    // meshes aren't saved with the scene, so free them when this component goes away
+    // meshes and tinted materials aren't saved with the scene, so free them when this component goes away
     void OnDisable()
     {
         DestroyMesh(ref floorMesh);
         DestroyMesh(ref wallMesh);
         DestroyMesh(ref ceilingMesh);
+        DestroyMesh(ref wallBlockMesh);
+        DestroyMaterials();
     }
 
     void Start()
@@ -92,9 +92,11 @@ public class baseMap : MonoBehaviour
         player = FindAnyObjectByType<FirstPersonController>();
         SpawnPlayer();
 
-        // the in-game generator panel, added here so older scenes get it without any setup
+        // the in-game panel and designer camera, added here so older scenes get them without any setup
         ui = GetComponent<MapUI>();
         if (ui == null) ui = gameObject.AddComponent<MapUI>();
+        designer = GetComponent<DesignerCamera>();
+        if (designer == null) designer = gameObject.AddComponent<DesignerCamera>();
     }
 
     // called whenever a value changes in the inspector
@@ -169,7 +171,7 @@ public class baseMap : MonoBehaviour
         if (kb == null) return;
 
         // while the panel is open, letters belong to its text field
-        if (ui != null && ui.IsOpen) return;
+        if (PanelOpen) return;
 
         // M toggles the minimap, N rolls a new map, R rebuilds the current one
         if (kb.mKey.wasPressedThisFrame) showOverlay = !showOverlay;
@@ -207,7 +209,32 @@ public class baseMap : MonoBehaviour
         if (overlayTexture != null) SafeDestroy(overlayTexture);
     }
 
+    // VIEW STATE
+
+    public bool PanelOpen => ui != null && ui.IsOpen;
+    public bool DesignerActive => designer != null && designer.IsActive;
+
+    // the player only gets the mouse and keyboard when no panel or designer view is using them
+    public void RefreshPlayerInput()
+    {
+        if (player != null) player.SetInputEnabled(!PanelOpen && !DesignerActive);
+    }
+
+    public void ToggleDesignerView()
+    {
+        if (designer != null) designer.SetActive(!designer.IsActive);
+    }
+
+    public Vector3 MapCenterWorld => CellToWorld(Layout.width / 2f, Layout.height / 2f);
+    public float MapSizeWorld => Mathf.Max(Layout.width, Layout.height) * cellSize;
+
     // 3D BUILD FROM THE 2D LAYOUT
+
+    // rebuilds only the meshes, e.g. after the wall height changes, without solving the map again
+    public void RebuildGeometry()
+    {
+        if (Layout != null) BuildGeometry();
+    }
 
     void BuildGeometry()
     {
@@ -215,24 +242,106 @@ public class baseMap : MonoBehaviour
         var root = GetOrCreateChild(transform, GeneratedRootName);
         root.gameObject.SetActive(build3D);
         if (!build3D) return;
+        RefreshMaterials();
 
         // fill the meshes from the grid, then hook them up to renderers and colliders
-        MapMeshBuilder.BuildFloor(Layout, cellSize, uvScale, EnsureMesh(ref floorMesh, "Map Floor"));
+        var groups = FloorGroups();
+        MapMeshBuilder.BuildFloor(Layout, cellSize, uvScale, EnsureMesh(ref floorMesh, "Map Floor"),
+            cell => groups[Layout.Index(cell.x, cell.y)], FloorGroupCount);
         MapMeshBuilder.BuildWalls(Layout, cellSize, wallHeight, uvScale, EnsureMesh(ref wallMesh, "Map Walls"));
-        SetupPart(root, "Floor", floorMesh, floorMaterial);
-        SetupPart(root, "Walls", wallMesh, wallMaterial);
+        SetupPart(root, "Floor", floorMesh, floorMaterials, true);
+        SetupPart(root, "Walls", wallMesh, new[] { wallMaterial }, true);
+
+        // optional parts are hidden rather than deleted so turning them back on is cheap
+        if (buildWallBlocks)
+        {
+            MapMeshBuilder.BuildWallBlocks(Layout, cellSize, wallHeight, uvScale, EnsureMesh(ref wallBlockMesh, "Map Wall Blocks"));
+            SetupPart(root, "Wall Blocks", wallBlockMesh, new[] { wallTopMaterial, wallMaterial }, false).SetActive(true);
+        }
+        else HidePart(root, "Wall Blocks");
 
         if (buildCeiling)
         {
             MapMeshBuilder.BuildCeiling(Layout, cellSize, wallHeight, uvScale, EnsureMesh(ref ceilingMesh, "Map Ceiling"));
-            SetupPart(root, "Ceiling", ceilingMesh, ceilingMaterial).SetActive(true);
+            SetupPart(root, "Ceiling", ceilingMesh, new[] { ceilingMaterial }, true).SetActive(true);
         }
-        else
+        else HidePart(root, "Ceiling");
+    }
+
+    // floor submesh for every cell: corridors and plain rooms first, then rooms with a role on top
+    int[] FloorGroups()
+    {
+        var groups = new int[Layout.cells.Length];
+        for (int i = 0; i < groups.Length; i++)
+            groups[i] = Layout.cells[i] == CellType.Corridor ? FloorCorridor : FloorRoom;
+
+        if (Plan.roles == null) return groups;
+        for (int r = 0; r < Layout.rooms.Count; r++)
         {
-            // hide rather than delete so turning the ceiling back on is cheap
-            var ceiling = root.Find("Ceiling");
-            if (ceiling != null) ceiling.gameObject.SetActive(false);
+            if (Plan.roles[r] == RoomRole.None) continue;
+
+            // role order matches the material slots: AttackerSpawn = 2, DefenderSpawn = 3, Mid = 4, Site = 5
+            int group = FloorCorridor + (int)Plan.roles[r];
+            var rect = Layout.rooms[r];
+            for (int y = rect.yMin; y < rect.yMax; y++)
+                for (int x = rect.xMin; x < rect.xMax; x++)
+                    groups[Layout.Index(x, y)] = group;
         }
+        return groups;
+    }
+
+    // tinted copies of the assigned materials, so the original assets are never changed
+    // copying keeps the shader, which a build needs (Shader.Find can miss shaders nothing references)
+    // remade on every build so they pick up any change to the source materials (e.g. new textures)
+    void RefreshMaterials()
+    {
+        DestroyMaterials();
+        floorMaterials = new Material[FloorGroupCount];
+        for (int i = 1; i < FloorGroupCount; i++) floorMaterials[i] = Copy(floorMaterial);
+
+        // slot 0 is the plain room floor, the asset itself
+        floorMaterials[FloorRoom] = floorMaterial;
+        Tint(floorMaterials[FloorCorridor], floorMaterial, Color.black, 0.2f);
+        Tint(floorMaterials[2], floorMaterial, MapStyle.Attacker, roleTint);
+        Tint(floorMaterials[3], floorMaterial, MapStyle.Defender, roleTint);
+        Tint(floorMaterials[4], floorMaterial, MapStyle.Mid, roleTint);
+        Tint(floorMaterials[5], floorMaterial, MapStyle.Site, roleTint);
+
+        // wall tops a bit darker than the walls, so outlines read clearly from above
+        wallTopMaterial = Copy(wallMaterial);
+        Tint(wallTopMaterial, wallMaterial, Color.black, 0.45f);
+    }
+
+    static Material Copy(Material source)
+    {
+        if (source == null) return null;
+        return new Material(source) { name = source.name + " (Tinted)", hideFlags = HideFlags.DontSave };
+    }
+
+    // sets target's color to source's color blended toward tint
+    // URP Lit uses _BaseColor, the built-in pipeline uses _Color, so handle both
+    static void Tint(Material target, Material source, Color tint, float amount)
+    {
+        if (target == null || source == null) return;
+        foreach (var prop in new[] { "_BaseColor", "_Color" })
+        {
+            if (!source.HasProperty(prop)) continue;
+            var c = Color.Lerp(source.GetColor(prop), tint, amount);
+            target.SetColor(prop, new Color(c.r, c.g, c.b, 1f));
+        }
+    }
+
+    void DestroyMaterials()
+    {
+        if (floorMaterials != null)
+        {
+            // slot 0 is the original asset, never destroy that one
+            for (int i = 1; i < floorMaterials.Length; i++)
+                if (floorMaterials[i] != null) SafeDestroy(floorMaterials[i]);
+            floorMaterials = null;
+        }
+        if (wallTopMaterial != null) SafeDestroy(wallTopMaterial);
+        wallTopMaterial = null;
     }
 
     // meshes are rebuilt from the seed every time, so they are never saved into the scene
@@ -242,18 +351,25 @@ public class baseMap : MonoBehaviour
         return mesh;
     }
 
-    // makes sure a child has a filter, renderer and collider all pointing at the given mesh
-    static GameObject SetupPart(Transform root, string name, Mesh mesh, Material material)
+    // makes sure a child has a filter and renderer (plus a collider if needed) all pointing at the given mesh
+    static GameObject SetupPart(Transform root, string name, Mesh mesh, Material[] materials, bool collide)
     {
         var go = GetOrCreateChild(root, name).gameObject;
         GetOrAdd<MeshFilter>(go).sharedMesh = mesh;
-        GetOrAdd<MeshRenderer>(go).sharedMaterial = material;
+        GetOrAdd<MeshRenderer>(go).sharedMaterials = materials;
+        if (!collide) return go;
 
         // clear first so the collider re-cooks the changed mesh
         var collider = GetOrAdd<MeshCollider>(go);
         collider.sharedMesh = null;
         collider.sharedMesh = mesh;
         return go;
+    }
+
+    static void HidePart(Transform root, string name)
+    {
+        var part = root.Find(name);
+        if (part != null) part.gameObject.SetActive(false);
     }
 
     // reuses an existing child by name so rebuilding doesn't pile up duplicates
@@ -330,16 +446,16 @@ public class baseMap : MonoBehaviour
 
         // start with a dark background everywhere
         var pixels = new Color[w * h];
-        for (int i = 0; i < pixels.Length; i++) pixels[i] = BackgroundColor;
+        for (int i = 0; i < pixels.Length; i++) pixels[i] = MapStyle.MapBackground;
 
         // outline each leaf partition, then paint floor cells over them, then tint rooms by role
-        foreach (var leaf in Layout.leaves) PaintOutline(pixels, w, leaf.bounds, PartitionColor);
+        foreach (var leaf in Layout.leaves) PaintOutline(pixels, w, leaf.bounds, MapStyle.Partition);
 
         // the cell grid and pixel array share the same y * width + x indexing, so copy straight across
         for (int i = 0; i < pixels.Length; i++)
         {
-            if (Layout.cells[i] == CellType.Room) pixels[i] = RoomColor;
-            else if (Layout.cells[i] == CellType.Corridor) pixels[i] = CorridorColor;
+            if (Layout.cells[i] == CellType.Room) pixels[i] = MapStyle.Room;
+            else if (Layout.cells[i] == CellType.Corridor) pixels[i] = MapStyle.Corridor;
         }
 
         // repaint each room in its role color (rooms without a role keep the plain room color)
@@ -390,60 +506,77 @@ public class baseMap : MonoBehaviour
     // color for a room's role, or the plain room color if it has none
     Color RoomColorFor(int room)
     {
-        if (Plan.roles == null) return RoomColor;
-        switch (Plan.roles[room])
-        {
-            case RoomRole.AttackerSpawn: return AttackerColor;
-            case RoomRole.DefenderSpawn: return DefenderColor;
-            case RoomRole.Mid: return MidColor;
-            case RoomRole.Site: return SiteColor;
-            default: return RoomColor;
-        }
+        return Plan.roles == null ? MapStyle.Room : MapStyle.RoleColor(Plan.roles[room]);
     }
 
     void OnGUI()
     {
         if (!Application.isPlaying || !showOverlay || Layout == null) return;
+        MapStyle.Ensure();
 
         // only rebuild the texture when the layout changed, not every frame
         if (overlayDirty || overlayTexture == null) RebuildOverlayTexture();
 
-        // fit the longer side to overlaySize and pin to the top-right corner
+        // fit the longer side to overlaySize and pin to the top-right corner, inside a dark frame
         float scale = overlaySize / (float)Mathf.Max(Layout.width, Layout.height);
         float w = Layout.width * scale, h = Layout.height * scale;
-        const float margin = 10f;
+        const float margin = 16f, frame = 6f;
         var mapRect = new Rect(Screen.width - w - margin, margin, w, h);
+        GUI.Box(new Rect(mapRect.x - frame, mapRect.y - frame, w + frame * 2f, h + frame * 2f), GUIContent.none, MapStyle.PanelBox);
 
         GUI.DrawTexture(mapRect, overlayTexture);
         DrawRoleLabels(mapRect, scale);
         DrawPlayerMarker(mapRect, scale);
-        DrawInfoBox(mapRect);
+        DrawInfoBox(new Rect(mapRect.x - frame, mapRect.yMax + frame + 6f, w + frame * 2f, 112f));
     }
 
-    // info box under the map: seed/hash, room counts, constraint result, key hints, then the temporary status line
-    void DrawInfoBox(Rect mapRect)
+    // info box under the map: seed/hash, room counts, constraint result, legend, key hints,
+    // then the temporary status line
+    void DrawInfoBox(Rect box)
     {
-        var infoRect = new Rect(mapRect.x, mapRect.yMax + 4f, mapRect.width, 84f);
-        GUI.Box(infoRect, GUIContent.none);
-        InfoLine(infoRect, 0, $"Seed {seed}   Hash {Plan.Hash:X8}");
-        InfoLine(infoRect, 1, $"Rooms {Layout.rooms.Count}   Reachable {Layout.reachableRooms}/{Layout.rooms.Count}");
-        InfoLine(infoRect, 2, ConstraintSummary());
-        InfoLine(infoRect, 3, "[M] map   [N] new seed   [R] regenerate");
+        GUI.Box(box, GUIContent.none, MapStyle.PanelBox);
+        var line = new Rect(box.x + 10f, box.y + 8f, box.width - 20f, 20f);
+
+        GUI.Label(line, $"Seed {seed}", MapStyle.Label);
+        GUI.Label(line, $"Hash {Plan.Hash:X8}", RightAligned(MapStyle.Small));
+        line.y += 20f;
+        GUI.Label(line, $"{Layout.rooms.Count} rooms, {Layout.reachableRooms} reachable", MapStyle.Small);
+        line.y += 18f;
+        bool ok = !constraints.enabled || Plan.Solved;
+        GUI.Label(line, ConstraintSummary(), ok ? MapStyle.OkLabel : MapStyle.FailLabel);
+        line.y += 24f;
+        DrawLegend(line);
+        line.y += 22f;
+        GUI.Label(line, "[Tab] panel  [V] designer  [M] map  [N] new  [R] redo", MapStyle.Small);
 
         // status from N or R, hidden once its time runs out
         if (statusMessage != null && Time.unscaledTime < statusUntil)
         {
-            var statusRect = new Rect(mapRect.x, infoRect.yMax + 4f, mapRect.width, 24f);
-            GUI.Box(statusRect, GUIContent.none);
-            InfoLine(statusRect, 0, statusMessage);
+            var statusRect = new Rect(box.x, box.yMax + 6f, box.width, 30f);
+            GUI.Box(statusRect, GUIContent.none, MapStyle.PanelBox);
+            GUI.Label(new Rect(statusRect.x + 10f, statusRect.y + 5f, statusRect.width - 20f, 20f), statusMessage, MapStyle.Small);
         }
     }
 
-    // label on a given row of a box, 20 pixels per row with a small inset from the edges
-    static void InfoLine(Rect box, int row, string text)
+    // color chip and name for each kind of area, spread evenly across one row
+    void DrawLegend(Rect row)
     {
-        GUI.Label(new Rect(box.x + 6f, box.y + 2f + row * 20f, box.width - 12f, 20f), text);
+        var items = new (string name, Color color)[]
+        {
+            ("ATK", MapStyle.Attacker), ("DEF", MapStyle.Defender), ("MID", MapStyle.Mid),
+            ("Site", MapStyle.Site), ("Room", MapStyle.Room), ("Hall", MapStyle.Corridor)
+        };
+        float slot = row.width / items.Length;
+        for (int i = 0; i < items.Length; i++)
+        {
+            float x = row.x + i * slot;
+            MapStyle.Fill(new Rect(x, row.y + 4f, 10f, 10f), items[i].color);
+            GUI.Label(new Rect(x + 13f, row.y, slot - 13f, 18f), items[i].name, MapStyle.Small);
+        }
     }
+
+    // right-aligned copy of a style, built once on first use
+    GUIStyle RightAligned(GUIStyle source) => rightAligned ??= new GUIStyle(source) { alignment = TextAnchor.UpperRight };
 
     // one line for the minimap, e.g. "Constraints OK (attempt 3)" or "Constraints: 2 failed"
     public string ConstraintSummary()
@@ -462,7 +595,7 @@ public class baseMap : MonoBehaviour
             if (label == null) continue;
 
             var p = CellToMinimap(mapRect, scale, Layout.rooms[r].center);
-            GUI.Label(new Rect(p.x - 16f, p.y - 10f, 32f, 20f), label, CenteredLabel);
+            GUI.Label(new Rect(p.x - 16f, p.y - 10f, 32f, 20f), label, MapStyle.MapLabel);
         }
     }
 
@@ -473,14 +606,6 @@ public class baseMap : MonoBehaviour
         return new Vector2(mapRect.x + cell.x * scale, mapRect.yMax - cell.y * scale);
     }
 
-    // built on first use, GUI styles can only be created inside OnGUI
-    GUIStyle CenteredLabel => centeredLabel ??= new GUIStyle(GUI.skin.label)
-    {
-        alignment = TextAnchor.MiddleCenter,
-        fontStyle = FontStyle.Bold,
-        normal = { textColor = Color.black }
-    };
-
     void DrawPlayerMarker(Rect mapRect, float scale)
     {
         if (player == null) return;
@@ -490,18 +615,16 @@ public class baseMap : MonoBehaviour
         // don't draw the dot when the player is outside the map (e.g. in the test room)
         if (!mapRect.Contains(p)) return;
 
-        // tint a white square, then restore the GUI color for anything drawn after
-        const float size = 6f;
-        var old = GUI.color;
-        GUI.color = PlayerColor;
-        GUI.DrawTexture(new Rect(p.x - size / 2f, p.y - size / 2f, size, size), Texture2D.whiteTexture);
-        GUI.color = old;
+        // dark outline first, then the dot, so it shows up on every floor color
+        const float size = 7f;
+        MapStyle.Fill(new Rect(p.x - size / 2f - 1f, p.y - size / 2f - 1f, size + 2f, size + 2f), MapStyle.MapBackground);
+        MapStyle.Fill(new Rect(p.x - size / 2f, p.y - size / 2f, size, size), MapStyle.Player);
     }
 
     // SCENE VIEW
 
     // grid cell (x, y) to a world position on the map's floor plane
-    Vector3 CellToWorld(float x, float y)
+    public Vector3 CellToWorld(float x, float y)
     {
         return transform.TransformPoint(new Vector3(x * cellSize, 0f, y * cellSize));
     }
@@ -528,13 +651,13 @@ public class baseMap : MonoBehaviour
             {
                 // shallow cuts are brighter so the split hierarchy is readable
                 float t = settings.maxDepth > 0 ? node.depth / (float)settings.maxDepth : 0f;
-                Gizmos.color = Color.Lerp(Color.white, PartitionColor, t);
+                Gizmos.color = Color.Lerp(Color.white, MapStyle.Partition, t);
                 DrawRectGizmo(node.bounds, 0f, false);
             }
         }
 
         // small height offsets stack corridors above partitions and rooms above corridors
-        if (drawCorridors) DrawFilledGizmos(Layout.corridors, CorridorColor, 0.02f);
+        if (drawCorridors) DrawFilledGizmos(Layout.corridors, MapStyle.Corridor, 0.02f);
         if (drawRooms) DrawRoomGizmos();
     }
 

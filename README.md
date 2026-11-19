@@ -15,6 +15,7 @@ A seeded procedural map generator for first-person levels, built in Unity for CM
 | N | Generate a new map from a random seed |
 | R | Regenerate the current seed (the hash should not change) |
 | Tab | Open the map generator panel (seed, sliders, constraint report) |
+| V | Designer view: overhead camera over the whole 3D map (WASD pan, Q/E rotate, scroll zoom, right-drag orbit, F reframe) |
 
 ## Phases
 
@@ -39,7 +40,9 @@ A seeded procedural map generator for first-person levels, built in Unity for CM
 | `Assets/Scripts/BSPGenerator.cs` | BSP split, room placement, corridors, cell grid and reachability check |
 | `Assets/Scripts/MapConstraintSolver.cs` | Assigns spawns, mid and sites, grows rooms to fit, adds site entrances and checks the rules |
 | `Assets/Scripts/MapMeshBuilder.cs` | Turns the cell grid into floor, wall and ceiling meshes |
-| `Assets/Scripts/MapUI.cs` | In-game generator panel and the current-area label |
+| `Assets/Scripts/MapUI.cs` | In-game generator panel, crosshair and the current-area label |
+| `Assets/Scripts/DesignerCamera.cs` | Overhead orbit camera for viewing the whole map |
+| `Assets/Scripts/MapStyle.cs` | Shared UI palette, role colors and GUI styles |
 | `Assets/Scripts/baseMap.cs` | Holds the seed and settings, builds the 3D map, draws the minimap and gizmos |
 | `Assets/Scripts/FirstPersonController.cs` | Player movement and mouse look |
 | `Assets/Editor/FPSmapsEditor.cs` | Inspector buttons, Play mode seed keeper, test scene builder |

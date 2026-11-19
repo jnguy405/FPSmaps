@@ -3,7 +3,7 @@ using UnityEngine.InputSystem;
 
 // in-game generator panel: seed field, Generate button, sliders for the main settings and the constraint report
 // Tab opens and closes it, player input pauses while it's open so the mouse can use the controls
-// also shows which area the player is standing in at the bottom of the screen
+// also draws the crosshair and shows which area the player is standing in at the bottom of the screen
 [RequireComponent(typeof(baseMap))]
 public class MapUI : MonoBehaviour
 {
@@ -13,11 +13,8 @@ public class MapUI : MonoBehaviour
     baseMap map;
     FirstPersonController player;
     string seedText;
-    Vector2 reportScroll;
+    Vector2 panelScroll;
     bool open;
-
-    // built on first use, GUI styles can only be created inside OnGUI
-    GUIStyle titleStyle, wrapStyle, failStyle, areaStyle;
 
     public bool IsOpen => open;
 
@@ -43,8 +40,8 @@ public class MapUI : MonoBehaviour
     {
         open = value;
 
-        // hand the mouse to the panel, or back to the player
-        if (player != null) player.SetInputEnabled(!open);
+        // hand the mouse to the panel, or back to the player (unless the designer view still has it)
+        map.RefreshPlayerInput();
 
         // show the real seed again next time, in case the text was a word
         if (open) seedText = map.seed.ToString();
@@ -77,35 +74,32 @@ public class MapUI : MonoBehaviour
     void OnGUI()
     {
         if (map.Plan == null) return;
-        EnsureStyles();
-        DrawAreaName();
+        MapStyle.Ensure();
+        DrawHud();
+        if (!open) return;
 
-        if (!open)
-        {
-            GUI.Label(new Rect(10f, Screen.height - 30f, 300f, 20f), "[Tab] map generator");
-            return;
-        }
-
-        GUILayout.BeginArea(new Rect(10f, 10f, panelWidth, Screen.height - 20f), GUI.skin.box);
-        GUILayout.Label("Map Generator", titleStyle);
+        // the whole panel scrolls, so it still fits on short screens
+        GUILayout.BeginArea(new Rect(16f, 16f, panelWidth, Screen.height - 32f), MapStyle.PanelBox);
+        panelScroll = GUILayout.BeginScrollView(panelScroll);
+        GUILayout.Label("Map Generator", MapStyle.Title);
+        GUILayout.Label("Changes apply when you press Generate", MapStyle.Small);
         DrawSeedRow();
-        GUILayout.Space(8f);
         DrawLayoutSliders();
-        GUILayout.Space(8f);
         DrawConstraintSliders();
-        GUILayout.Space(8f);
-        if (GUILayout.Button("Generate", GUILayout.Height(32f))) Apply();
-        GUILayout.Space(8f);
+        GUILayout.Space(10f);
+        if (GUILayout.Button("Generate", MapStyle.AccentButton, GUILayout.Height(34f))) Apply();
+        DrawViewSection();
         DrawReport();
+        GUILayout.EndScrollView();
         GUILayout.EndArea();
     }
 
     void DrawSeedRow()
     {
+        GUILayout.Label("SEED", MapStyle.Header);
         GUILayout.BeginHorizontal();
-        GUILayout.Label("Seed", GUILayout.Width(40f));
-        seedText = GUILayout.TextField(seedText);
-        if (GUILayout.Button("Random", GUILayout.Width(70f)))
+        seedText = GUILayout.TextField(seedText, GUILayout.Height(24f));
+        if (GUILayout.Button("Random", MapStyle.Button, GUILayout.Width(76f), GUILayout.Height(24f)))
         {
             seedText = Random.Range(0, int.MaxValue).ToString();
             Apply();
@@ -114,13 +108,13 @@ public class MapUI : MonoBehaviour
 
         // a word seed shows the number it turns into, so it can be shared either way
         if (!int.TryParse(seedText.Trim(), out _))
-            GUILayout.Label($"= seed {ParseSeed(seedText)}", wrapStyle);
+            GUILayout.Label($"= seed {ParseSeed(seedText)}", MapStyle.Small);
     }
 
     void DrawLayoutSliders()
     {
         var s = map.settings;
-        GUILayout.Label("Layout", titleStyle);
+        GUILayout.Label("LAYOUT", MapStyle.Header);
 
         // the map stays square, one slider sets both sides
         int size = IntSlider("Map size", s.width, 32, 128);
@@ -134,7 +128,7 @@ public class MapUI : MonoBehaviour
     void DrawConstraintSliders()
     {
         var c = map.constraints;
-        GUILayout.Label("Constraints", titleStyle);
+        GUILayout.Label("CONSTRAINTS", MapStyle.Header);
         c.enabled = GUILayout.Toggle(c.enabled, " Use attack/defense constraints");
         if (!c.enabled) return;
 
@@ -145,15 +139,59 @@ public class MapUI : MonoBehaviour
         c.preferredEntrancesPerSide = IntSlider("Entrances per side", c.preferredEntrancesPerSide, 1, 3);
     }
 
-    // summary, every broken rule, then the distance report, scrolling if it runs long
+    // settings that only change how the map looks, so they apply right away without a new layout
+    void DrawViewSection()
+    {
+        GUILayout.Label("VIEW", MapStyle.Header);
+
+        string label = map.DesignerActive ? "Back to Player View  [V]" : "Designer View  [V]";
+        if (GUILayout.Button(label, MapStyle.Button, GUILayout.Height(28f))) map.ToggleDesignerView();
+
+        // only rebuild the meshes when the value actually moved
+        float height = FloatSlider("Wall height", map.wallHeight, 2f, 6f);
+        if (!Mathf.Approximately(height, map.wallHeight))
+        {
+            map.wallHeight = height;
+            map.RebuildGeometry();
+        }
+        map.showOverlay = GUILayout.Toggle(map.showOverlay, " Show minimap  [M]");
+    }
+
+    // summary, every broken rule, then the distance report
     void DrawReport()
     {
         var plan = map.Plan;
-        GUILayout.Label(map.ConstraintSummary(), titleStyle);
-        reportScroll = GUILayout.BeginScrollView(reportScroll);
-        foreach (var f in plan.failures) GUILayout.Label("FAILED: " + f, failStyle);
-        foreach (var line in plan.report) GUILayout.Label(line, wrapStyle);
-        GUILayout.EndScrollView();
+        bool ok = !map.constraints.enabled || plan.Solved;
+        GUILayout.Label("REPORT", MapStyle.Header);
+        GUILayout.Label(map.ConstraintSummary(), ok ? MapStyle.OkLabel : MapStyle.FailLabel);
+        foreach (var f in plan.failures) GUILayout.Label("• " + f, MapStyle.FailLabel);
+        foreach (var line in plan.report) GUILayout.Label(line, MapStyle.Small);
+    }
+
+    // HUD
+
+    // crosshair and area name in player view, plus a hint line when the panel is closed
+    void DrawHud()
+    {
+        bool playerView = !map.DesignerActive && !open;
+        if (playerView) DrawCrosshair();
+        if (playerView) DrawAreaName();
+
+        if (!open)
+        {
+            string hint = map.DesignerActive
+                ? "Designer view: WASD pan   Q/E rotate   scroll zoom   right-drag orbit   F frame   V exit"
+                : "[Tab] map generator   [V] designer view";
+            MapStyle.ShadowLabel(new Rect(16f, Screen.height - 30f, Screen.width - 32f, 20f), hint, MapStyle.Small);
+        }
+    }
+
+    // small dot with a dark rim, so it reads against light walls and dark floors alike
+    static void DrawCrosshair()
+    {
+        float cx = Screen.width / 2f, cy = Screen.height / 2f;
+        MapStyle.Fill(new Rect(cx - 3f, cy - 3f, 6f, 6f), new Color(0f, 0f, 0f, 0.6f));
+        MapStyle.Fill(new Rect(cx - 2f, cy - 2f, 4f, 4f), MapStyle.TextColor);
     }
 
     // name of the area under the player, centered near the bottom of the screen
@@ -162,7 +200,7 @@ public class MapUI : MonoBehaviour
         if (player == null) return;
         string area = map.AreaNameAt(player.transform.position);
         if (area == null) return;
-        GUI.Label(new Rect(0f, Screen.height - 60f, Screen.width, 30f), area, areaStyle);
+        MapStyle.ShadowLabel(new Rect(0f, Screen.height - 76f, Screen.width, 32f), area, MapStyle.Area);
     }
 
     // CONTROLS
@@ -182,24 +220,10 @@ public class MapUI : MonoBehaviour
     float SliderRow(string label, float value, float min, float max, string format)
     {
         GUILayout.BeginHorizontal();
-        GUILayout.Label(label, GUILayout.Width(130f));
-        value = GUILayout.HorizontalSlider(value, min, max);
-        GUILayout.Label(value.ToString(format), GUILayout.Width(36f));
+        GUILayout.Label(label, MapStyle.Label, GUILayout.Width(140f));
+        value = GUILayout.HorizontalSlider(value, min, max, GUILayout.ExpandWidth(true));
+        GUILayout.Label(value.ToString(format), MapStyle.Small, GUILayout.Width(36f));
         GUILayout.EndHorizontal();
         return value;
-    }
-
-    void EnsureStyles()
-    {
-        if (titleStyle != null) return;
-        titleStyle = new GUIStyle(GUI.skin.label) { fontStyle = FontStyle.Bold };
-        wrapStyle = new GUIStyle(GUI.skin.label) { wordWrap = true };
-        failStyle = new GUIStyle(wrapStyle) { normal = { textColor = new Color(1f, 0.55f, 0.45f) } };
-        areaStyle = new GUIStyle(GUI.skin.label)
-        {
-            alignment = TextAnchor.MiddleCenter,
-            fontSize = 20,
-            fontStyle = FontStyle.Bold
-        };
     }
 }
