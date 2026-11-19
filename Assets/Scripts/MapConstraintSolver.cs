@@ -176,69 +176,80 @@ public static class MapConstraintSolver
             return plan;
         }
 
-        // steps 1 to 3 for every orientation: spawns at edge middles, mid at the center, sites either side
-        // keep whichever orientation scores best
-        var dist = RoomDistances(layout);
+        // steps 1 to 3: spawns, mid and sites, for whichever orientation scores best
         int pad = settings.roomPadding;
-        Orientation bestO = Orientations[0];
-        int bestAtk = -1, bestDef = -1, bestMid = -1;
-        List<int> bestSites = null;
-        float bestCost = float.MaxValue;
-        foreach (var o in Orientations)
-        {
-            int atk = PickSpawn(layout, o, 0f, -1, pad);
-            int def = PickSpawn(layout, o, 1f, atk, pad);
-            int mid = PickMid(layout, atk, def, pad);
-            if (mid < 0) continue;
-
-            // placement cost: how far spawns and mid would sit from where they should, once grown
-            float cost = SpawnOffset(layout, o, GrownSpawn(layout, o, atk, 0f, pad), 0f)
-                       + SpawnOffset(layout, o, GrownSpawn(layout, o, def, 1f, pad), 1f)
-                       + MidOffset(layout, GrownMid(layout, mid, pad));
-            var sites = PickSites(layout, dist, o, atk, def, mid, c, pad, out float siteCost);
-
-            // an orientation that finds sites always beats one that doesn't
-            cost += sites != null ? siteCost : 1000f;
-            if (cost < bestCost)
-            {
-                bestCost = cost;
-                bestO = o;
-                bestAtk = atk;
-                bestDef = def;
-                bestMid = mid;
-                bestSites = sites;
-            }
-        }
-
-        if (bestMid < 0)
+        var pick = ChooseOrientation(layout, RoomDistances(layout), c, pad);
+        if (pick.mid < 0)
         {
             plan.failures.Add("Not enough distinct rooms for spawns and mid");
             return plan;
         }
 
-        plan.attackerSpawn = bestAtk;
-        plan.defenderSpawn = bestDef;
-        plan.mid = bestMid;
-        plan.roles[bestAtk] = RoomRole.AttackerSpawn;
-        plan.roles[bestDef] = RoomRole.DefenderSpawn;
-        plan.roles[bestMid] = RoomRole.Mid;
-        plan.report.Add(bestO.Name);
-
-        if (bestSites == null)
+        AssignRoles(plan, pick);
+        if (pick.sites == null)
         {
             plan.failures.Add($"No {c.siteCount} rooms work as sites (size, sides, defender advantage, separation)");
             return plan;
         }
-        plan.sites.AddRange(bestSites);
-        foreach (var s in bestSites) plan.roles[s] = RoomRole.Site;
 
         // step 4: grow rooms toward where their roles want them
-        RepairRooms(plan, bestO, c, pad);
+        RepairRooms(plan, pick.o, c, pad);
 
         // step 5: corridors so each site has entrances from both sides and from mid, then re-measure
-        AddSiteEntrances(plan, bestO, c, settings.corridorWidth, seed);
-        Validate(plan, RoomDistances(layout), bestO, c);
+        AddSiteEntrances(plan, pick.o, c, settings.corridorWidth, seed);
+        Validate(plan, RoomDistances(layout), pick.o, c);
         return plan;
+    }
+
+    // one orientation's choice of rooms, before anything is written into the plan
+    struct Placement
+    {
+        public Orientation o;
+        public int atk, def, mid;
+        public List<int> sites;   // null if no set of sites passed the hard rules
+        public float cost;
+    }
+
+    // tries spawns at edge middles, mid at the center and sites either side for every orientation
+    // and keeps whichever scores best
+    static Placement ChooseOrientation(BSPLayout layout, int[,] dist, MapConstraints c, int pad)
+    {
+        var best = new Placement { mid = -1, cost = float.MaxValue };
+        foreach (var o in Orientations)
+        {
+            var p = new Placement { o = o };
+            p.atk = PickSpawn(layout, o, 0f, -1, pad);
+            p.def = PickSpawn(layout, o, 1f, p.atk, pad);
+            p.mid = PickMid(layout, p.atk, p.def, pad);
+            if (p.mid < 0) continue;
+
+            // placement cost: how far spawns and mid would sit from where they should, once grown
+            p.cost = SpawnOffset(layout, o, GrownSpawn(layout, o, p.atk, 0f, pad), 0f)
+                   + SpawnOffset(layout, o, GrownSpawn(layout, o, p.def, 1f, pad), 1f)
+                   + MidOffset(layout, GrownMid(layout, p.mid, pad));
+            p.sites = PickSites(layout, dist, o, p.atk, p.def, p.mid, c, pad, out float siteCost);
+
+            // an orientation that finds sites always beats one that doesn't
+            p.cost += p.sites != null ? siteCost : 1000f;
+            if (p.cost < best.cost) best = p;
+        }
+        return best;
+    }
+
+    // writes the chosen rooms into the plan, sites only if there are any
+    static void AssignRoles(MapPlan plan, Placement p)
+    {
+        plan.attackerSpawn = p.atk;
+        plan.defenderSpawn = p.def;
+        plan.mid = p.mid;
+        plan.roles[p.atk] = RoomRole.AttackerSpawn;
+        plan.roles[p.def] = RoomRole.DefenderSpawn;
+        plan.roles[p.mid] = RoomRole.Mid;
+        plan.report.Add(p.o.Name);
+
+        if (p.sites == null) return;
+        plan.sites.AddRange(p.sites);
+        foreach (var s in p.sites) plan.roles[s] = RoomRole.Site;
     }
 
     // GEOMETRY
@@ -350,43 +361,43 @@ public static class MapConstraintSolver
         return dist;
     }
 
-    // room that can best reach the middle of the edge at along = edge, skipping the other spawn
-    static int PickSpawn(BSPLayout l, Orientation o, float edge, int skip, int pad)
+    // index with the lowest cost, or -1 if every cost is infinite (callers return infinity to skip an index)
+    // ties keep the earlier index, so the result only ever depends on room order
+    static int ArgMin(int count, Func<int, float> cost)
     {
         int best = -1;
-        float bestCost = float.MaxValue;
-        for (int i = 0; i < l.rooms.Count; i++)
+        float bestCost = float.PositiveInfinity;
+        for (int i = 0; i < count; i++)
         {
-            if (i == skip) continue;
-            float cost = SpawnOffset(l, o, GrownSpawn(l, o, i, edge, pad), edge);
-            if (cost < bestCost)
+            float value = cost(i);
+            if (value < bestCost)
             {
-                bestCost = cost;
+                bestCost = value;
                 best = i;
             }
         }
         return best;
     }
 
+    // room that can best reach the middle of the edge at along = edge, skipping the other spawn
+    static int PickSpawn(BSPLayout l, Orientation o, float edge, int skip, int pad)
+    {
+        return ArgMin(l.rooms.Count, i => i == skip
+            ? float.PositiveInfinity
+            : SpawnOffset(l, o, GrownSpawn(l, o, i, edge, pad), edge));
+    }
+
     // room that can best cover the map center once grown, skipping both spawns
     static int PickMid(BSPLayout l, int atk, int def, int pad)
     {
-        int best = -1;
-        float bestGap = float.MaxValue;
         var center = MapCenter(l);
-        for (int i = 0; i < l.rooms.Count; i++)
+        return ArgMin(l.rooms.Count, i =>
         {
-            if (i == atk || i == def) continue;
+            if (i == atk || i == def) return float.PositiveInfinity;
 
             // ties (several rooms able to reach the center) go to the room whose center is closest
-            float gap = CenterGap(l, GrownMid(l, i, pad)) + 0.001f * (l.rooms[i].center - center).magnitude;
-            if (gap < bestGap)
-            {
-                bestGap = gap;
-                best = i;
-            }
-        }
-        return best;
+            return CenterGap(l, GrownMid(l, i, pad)) + 0.001f * (l.rooms[i].center - center).magnitude;
+        });
     }
 
     // A from the left side, B from the right side, C (if any) from what's left
@@ -532,14 +543,8 @@ public static class MapConstraintSolver
         attacker = 0;
         defender = 0;
         fromMid = false;
-        foreach (var conn in plan.layout.connections)
+        foreach (var other in plan.layout.Neighbors(site))
         {
-            // connections are stored as pairs, find the room on the other end
-            int other;
-            if (conn.x == site) other = conn.y;
-            else if (conn.y == site) other = conn.x;
-            else continue;
-
             if (other == plan.mid) fromMid = true;
             if (IsAttackerSide(plan, o, site, other)) attacker++;
             else defender++;
@@ -581,22 +586,13 @@ public static class MapConstraintSolver
     static int NearestOnSide(MapPlan plan, Orientation o, int site, bool attackerSide)
     {
         var rooms = plan.layout.rooms;
-        int best = -1;
-        float bestDist = float.MaxValue;
-        for (int i = 0; i < rooms.Count; i++)
+        return ArgMin(rooms.Count, i =>
         {
-            if (i == site || plan.layout.AreConnected(site, i)) continue;
-            if (plan.roles[i] == RoomRole.AttackerSpawn || plan.roles[i] == RoomRole.DefenderSpawn) continue;
-            if (IsAttackerSide(plan, o, site, i) != attackerSide) continue;
-
-            float d = (rooms[i].center - rooms[site].center).sqrMagnitude;
-            if (d < bestDist)
-            {
-                bestDist = d;
-                best = i;
-            }
-        }
-        return best;
+            if (i == site || plan.layout.AreConnected(site, i)) return float.PositiveInfinity;
+            if (plan.roles[i] == RoomRole.AttackerSpawn || plan.roles[i] == RoomRole.DefenderSpawn) return float.PositiveInfinity;
+            if (IsAttackerSide(plan, o, site, i) != attackerSide) return float.PositiveInfinity;
+            return (rooms[i].center - rooms[site].center).sqrMagnitude;
+        });
     }
 
     // VALIDATION
@@ -605,60 +601,46 @@ public static class MapConstraintSolver
     static void Validate(MapPlan plan, int[,] dist, Orientation o, MapConstraints c)
     {
         var l = plan.layout;
-        int atk = plan.attackerSpawn, def = plan.defenderSpawn, mid = plan.mid;
-
         if (!l.AllRoomsReachable)
             plan.failures.Add($"Only {l.reachableRooms}/{l.rooms.Count} rooms reachable");
 
         // rule 4: spawns on their edge, in the middle of it
-        CheckSpawn(plan, o, atk, 0f, "Attacker", c);
-        CheckSpawn(plan, o, def, 1f, "Defender", c);
+        CheckSpawn(plan, o, plan.attackerSpawn, 0f, "Attacker", c);
+        CheckSpawn(plan, o, plan.defenderSpawn, 1f, "Defender", c);
 
-        // rule 1: mid in the middle of the map, and fair to walk to
-        float gap = MidOffset(l, l.rooms[mid]);
-        int mA = dist[atk, mid], mD = dist[def, mid];
+        CheckMid(plan, dist, c);
+        CheckSiteLayout(plan, dist, o, c);
+        foreach (var s in plan.sites) CheckSite(plan, dist, o, s, c);
+    }
+
+    // rule 1: mid in the middle of the map, and fair to walk to
+    static void CheckMid(MapPlan plan, int[,] dist, MapConstraints c)
+    {
+        int mid = plan.mid;
+        float gap = MidOffset(plan.layout, plan.layout.rooms[mid]);
+        int mA = dist[plan.attackerSpawn, mid], mD = dist[plan.defenderSpawn, mid];
         float balance = Mathf.Abs(mA - mD) / (float)Mathf.Max(1, mA + mD);
         plan.report.Add($"Mid: {gap:0.00} from center, attackers {mA}, defenders {mD}");
         if (gap > c.midCentering)
             plan.failures.Add($"Mid is {gap:0.00} from the map center, max {c.midCentering:0.00}");
         if (balance > c.midBalance)
             plan.failures.Add($"Mid walk is uneven ({balance:0.00}, max {c.midBalance:0.00})");
+    }
 
-        // rule 2: A and B on opposite sides, with even distances
+    // rule 2: A and B on opposite sides with even distances, and every site far enough from the others
+    static void CheckSiteLayout(MapPlan plan, int[,] dist, Orientation o, MapConstraints c)
+    {
+        var l = plan.layout;
         if (Across(l, o, plan.sites[0]) >= 0f || Across(l, o, plan.sites[1]) <= 0f)
             plan.failures.Add("Sites A and B are not on opposite sides");
-        float imbalance = SiteImbalance(plan.sites, dist, atk, def, mid);
+
+        float imbalance = SiteImbalance(plan.sites, dist, plan.attackerSpawn, plan.defenderSpawn, plan.mid);
         plan.report.Add($"Site distance spread: {imbalance:0.00} (max {c.siteBalance:0.00})");
         if (imbalance > c.siteBalance)
             plan.failures.Add($"Site distances are uneven ({imbalance:0.00}, max {c.siteBalance:0.00})");
 
-        // per site: size, defender advantage, rule 3 entrances
-        foreach (var s in plan.sites)
-        {
-            string name = plan.Label(s);
-            var r = l.rooms[s];
-            int dA = dist[atk, s], dD = dist[def, s], dM = dist[mid, s];
-            CountEntrances(plan, o, s, out int inAtk, out int inDef, out bool fromMid);
-            plan.report.Add($"Site {name}: mid {dM}, attackers {dA}, defenders {dD} | entrances {inAtk} atk, {inDef} def{(fromMid ? " (1 from mid)" : "")}");
-
-            if (r.width * r.height < c.minSiteArea)
-                plan.failures.Add($"Site {name} is {r.width * r.height} cells, need {c.minSiteArea}");
-            if (dD > dA * c.defenderAdvantage)
-                plan.failures.Add($"Site {name}: defenders ({dD}) not ahead of attackers ({dA})");
-            if (inAtk < c.minEntrancesPerSide)
-                plan.failures.Add($"Site {name} has {inAtk} attacker entrances, need {c.minEntrancesPerSide}");
-            if (inDef < c.minEntrancesPerSide)
-                plan.failures.Add($"Site {name} has {inDef} defender entrances, need {c.minEntrancesPerSide}");
-            if (c.midEntrance && !fromMid)
-                plan.failures.Add($"Site {name} has no entrance from mid");
-
-            // preferred counts are a guideline, so only noted
-            if (inAtk < c.preferredEntrancesPerSide || inDef < c.preferredEntrancesPerSide)
-                plan.report.Add($"Site {name} is below the preferred {c.preferredEntrancesPerSide} entrances per side");
-        }
-
-        // sites far enough apart to play as separate sites
-        float minSep = c.minSiteSeparation * dist[atk, def];
+        // sites too close together would play like one big site
+        float minSep = c.minSiteSeparation * dist[plan.attackerSpawn, plan.defenderSpawn];
         for (int p = 0; p < plan.sites.Count; p++)
         {
             for (int q = p + 1; q < plan.sites.Count; q++)
@@ -668,6 +650,31 @@ public static class MapConstraintSolver
                     plan.failures.Add($"Sites {plan.Label(plan.sites[p])} and {plan.Label(plan.sites[q])} only {d} cells apart");
             }
         }
+    }
+
+    // one site: size, defender advantage, rule 3 entrances
+    static void CheckSite(MapPlan plan, int[,] dist, Orientation o, int s, MapConstraints c)
+    {
+        string name = plan.Label(s);
+        var r = plan.layout.rooms[s];
+        int dA = dist[plan.attackerSpawn, s], dD = dist[plan.defenderSpawn, s], dM = dist[plan.mid, s];
+        CountEntrances(plan, o, s, out int inAtk, out int inDef, out bool fromMid);
+        plan.report.Add($"Site {name}: mid {dM}, attackers {dA}, defenders {dD} | entrances {inAtk} atk, {inDef} def{(fromMid ? " (1 from mid)" : "")}");
+
+        if (r.width * r.height < c.minSiteArea)
+            plan.failures.Add($"Site {name} is {r.width * r.height} cells, need {c.minSiteArea}");
+        if (dD > dA * c.defenderAdvantage)
+            plan.failures.Add($"Site {name}: defenders ({dD}) not ahead of attackers ({dA})");
+        if (inAtk < c.minEntrancesPerSide)
+            plan.failures.Add($"Site {name} has {inAtk} attacker entrances, need {c.minEntrancesPerSide}");
+        if (inDef < c.minEntrancesPerSide)
+            plan.failures.Add($"Site {name} has {inDef} defender entrances, need {c.minEntrancesPerSide}");
+        if (c.midEntrance && !fromMid)
+            plan.failures.Add($"Site {name} has no entrance from mid");
+
+        // preferred counts are a guideline, so only noted
+        if (inAtk < c.preferredEntrancesPerSide || inDef < c.preferredEntrancesPerSide)
+            plan.report.Add($"Site {name} is below the preferred {c.preferredEntrancesPerSide} entrances per side");
     }
 
     static void CheckSpawn(MapPlan plan, Orientation o, int room, float edge, string team, MapConstraints c)

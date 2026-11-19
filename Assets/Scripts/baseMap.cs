@@ -301,12 +301,18 @@ public class baseMap : MonoBehaviour
         player.SetSpawn(pos, player.transform.rotation);
     }
 
+    // world position to grid coordinates, in cells (fractional), relative to the map object
+    Vector2 WorldToCell(Vector3 worldPos)
+    {
+        Vector3 local = transform.InverseTransformPoint(worldPos) / cellSize;
+        return new Vector2(local.x, local.z);
+    }
+
     // what a world position is standing in: a role name, "Room", "Corridor", or null outside the map
     public string AreaNameAt(Vector3 worldPos)
     {
         if (Layout == null) return null;
-        Vector3 local = transform.InverseTransformPoint(worldPos) / cellSize;
-        var cell = new Vector2Int(Mathf.FloorToInt(local.x), Mathf.FloorToInt(local.z));
+        var cell = Vector2Int.FloorToInt(WorldToCell(worldPos));
         if (!Layout.IsFloor(cell.x, cell.y)) return null;
 
         // rooms win over corridors, since corridor cells inside a room are part of it
@@ -455,12 +461,16 @@ public class baseMap : MonoBehaviour
             string label = Plan.Label(r);
             if (label == null) continue;
 
-            // same flip as the player marker, cells go up in +Z and GUI rows go down
-            var c = Layout.rooms[r].center;
-            float px = mapRect.x + c.x * scale;
-            float py = mapRect.yMax - c.y * scale;
-            GUI.Label(new Rect(px - 16f, py - 10f, 32f, 20f), label, CenteredLabel);
+            var p = CellToMinimap(mapRect, scale, Layout.rooms[r].center);
+            GUI.Label(new Rect(p.x - 16f, p.y - 10f, 32f, 20f), label, CenteredLabel);
         }
+    }
+
+    // grid coordinates to a screen point on the minimap
+    // map cells go up in +Z, GUI rows go down, so flip the vertical axis
+    static Vector2 CellToMinimap(Rect mapRect, float scale, Vector2 cell)
+    {
+        return new Vector2(mapRect.x + cell.x * scale, mapRect.yMax - cell.y * scale);
     }
 
     // built on first use, GUI styles can only be created inside OnGUI
@@ -475,20 +485,16 @@ public class baseMap : MonoBehaviour
     {
         if (player == null) return;
 
-        // player position in grid cells, relative to the map object
-        // map cells go up in +Z, GUI rows go down, so flip the vertical axis
-        Vector3 local = transform.InverseTransformPoint(player.transform.position) / cellSize;
-        float px = mapRect.x + local.x * scale;
-        float py = mapRect.yMax - local.z * scale;
+        var p = CellToMinimap(mapRect, scale, WorldToCell(player.transform.position));
 
         // don't draw the dot when the player is outside the map (e.g. in the test room)
-        if (!mapRect.Contains(new Vector2(px, py))) return;
+        if (!mapRect.Contains(p)) return;
 
         // tint a white square, then restore the GUI color for anything drawn after
         const float size = 6f;
         var old = GUI.color;
         GUI.color = PlayerColor;
-        GUI.DrawTexture(new Rect(px - size / 2f, py - size / 2f, size, size), Texture2D.whiteTexture);
+        GUI.DrawTexture(new Rect(p.x - size / 2f, p.y - size / 2f, size, size), Texture2D.whiteTexture);
         GUI.color = old;
     }
 

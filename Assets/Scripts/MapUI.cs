@@ -167,23 +167,24 @@ public class MapUI : MonoBehaviour
 
     // CONTROLS
 
-    // label, slider and current value on one row
+    // whole-number slider, rounded so it snaps to integers
     int IntSlider(string label, int value, int min, int max)
     {
-        GUILayout.BeginHorizontal();
-        GUILayout.Label(label, GUILayout.Width(130f));
-        value = Mathf.RoundToInt(GUILayout.HorizontalSlider(value, min, max));
-        GUILayout.Label(value.ToString(), GUILayout.Width(36f));
-        GUILayout.EndHorizontal();
-        return value;
+        return Mathf.RoundToInt(SliderRow(label, value, min, max, "0"));
     }
 
     float FloatSlider(string label, float value, float min, float max)
     {
+        return SliderRow(label, value, min, max, "0.00");
+    }
+
+    // label, slider and current value on one row, the value shown in the given number format
+    float SliderRow(string label, float value, float min, float max, string format)
+    {
         GUILayout.BeginHorizontal();
         GUILayout.Label(label, GUILayout.Width(130f));
         value = GUILayout.HorizontalSlider(value, min, max);
-        GUILayout.Label(value.ToString("0.00"), GUILayout.Width(36f));
+        GUILayout.Label(value.ToString(format), GUILayout.Width(36f));
         GUILayout.EndHorizontal();
         return value;
     }

@@ -100,13 +100,15 @@ public class BSPLayout
 
     public bool AllRoomsReachable => reachableRooms == rooms.Count;
 
-    // how many corridors start or end at this room
-    public int Degree(int room)
+    // rooms joined to this one by a corridor, once per corridor
+    // connections are stored as pairs, so this returns whichever end isn't the room itself
+    public IEnumerable<int> Neighbors(int room)
     {
-        int count = 0;
         foreach (var c in connections)
-            if (c.x == room || c.y == room) count++;
-        return count;
+        {
+            if (c.x == room) yield return c.y;
+            else if (c.y == room) yield return c.x;
+        }
     }
 
     // replaces a room's rect, keeping its leaf in sync (call BSPGenerator.Bake afterwards)
@@ -118,8 +120,8 @@ public class BSPLayout
 
     public bool AreConnected(int a, int b)
     {
-        foreach (var c in connections)
-            if ((c.x == a && c.y == b) || (c.x == b && c.y == a)) return true;
+        foreach (var n in Neighbors(a))
+            if (n == b) return true;
         return false;
     }
 
