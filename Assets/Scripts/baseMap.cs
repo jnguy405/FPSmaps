@@ -35,6 +35,15 @@ public class baseMap : MonoBehaviour
     public Material ceilingMaterial;
     [Tooltip("How strongly spawn, mid and site floors are tinted with their role color.")]
     [Range(0f, 1f)] public float roleTint = 0.4f;
+
+    [Header("Surfaces")]
+    [Tooltip("Assigned: the materials above as they are. Fixed: the noise textures chosen below. Random: picked from the seed, together with any extra materials.")]
+    public SurfaceMode surfaceMode = SurfaceMode.RandomFromSeed;
+    public SurfaceKind floorSurface = SurfaceKind.SandstoneTiles;
+    public SurfaceKind wallSurface = SurfaceKind.Sandstone;
+    [Tooltip("Your own materials, added to the random pick alongside the noise textures.")]
+    public Material[] extraFloorMaterials;
+    public Material[] extraWallMaterials;
     [Tooltip("Move the player into the attacker spawn (or the first room) on Play and on a new seed.")]
     public bool spawnPlayerInMap = true;
 
@@ -65,6 +74,11 @@ public class baseMap : MonoBehaviour
     Mesh floorMesh, wallMesh, ceilingMesh, wallBlockMesh;
     Material[] floorMaterials;      // tinted copies made at runtime, never saved
     Material wallTopMaterial;
+    Material floorSource, wallSource;                        // the floor and wall this build uses
+    readonly List<Material> generatedSurfaces = new List<Material>();   // noise-textured copies, never saved
+
+    // what the current map is surfaced with, e.g. "Sandstone floor, Blue-grey concrete walls"
+    public string SurfaceSummary { get; private set; } = "";
     FirstPersonController player;
     MapUI ui;
     DesignerCamera designer;
@@ -250,20 +264,22 @@ public class baseMap : MonoBehaviour
             cell => groups[Layout.Index(cell.x, cell.y)], FloorGroupCount);
         MapMeshBuilder.BuildWalls(Layout, cellSize, wallHeight, uvScale, EnsureMesh(ref wallMesh, "Map Walls"));
         SetupPart(root, "Floor", floorMesh, floorMaterials, true);
-        SetupPart(root, "Walls", wallMesh, new[] { wallMaterial }, true);
+        SetupPart(root, "Walls", wallMesh, new[] { wallSource }, true);
 
         // optional parts are hidden rather than deleted so turning them back on is cheap
         if (buildWallBlocks)
         {
             MapMeshBuilder.BuildWallBlocks(Layout, cellSize, wallHeight, uvScale, EnsureMesh(ref wallBlockMesh, "Map Wall Blocks"));
-            SetupPart(root, "Wall Blocks", wallBlockMesh, new[] { wallTopMaterial, wallMaterial }, false).SetActive(true);
+            SetupPart(root, "Wall Blocks", wallBlockMesh, new[] { wallTopMaterial, wallSource }, false).SetActive(true);
         }
         else HidePart(root, "Wall Blocks");
 
+        // the ceiling matches the walls unless the assigned materials are in use
         if (buildCeiling)
         {
+            var ceiling = surfaceMode == SurfaceMode.Assigned ? ceilingMaterial : wallSource;
             MapMeshBuilder.BuildCeiling(Layout, cellSize, wallHeight, uvScale, EnsureMesh(ref ceilingMesh, "Map Ceiling"));
-            SetupPart(root, "Ceiling", ceilingMesh, new[] { ceilingMaterial }, true).SetActive(true);
+            SetupPart(root, "Ceiling", ceilingMesh, new[] { ceiling }, true).SetActive(true);
         }
         else HidePart(root, "Ceiling");
     }
@@ -290,26 +306,77 @@ public class baseMap : MonoBehaviour
         return groups;
     }
 
-    // tinted copies of the assigned materials, so the original assets are never changed
+    // tinted copies of the chosen surfaces, so the original assets are never changed
     // copying keeps the shader, which a build needs (Shader.Find can miss shaders nothing references)
     // remade on every build so they pick up any change to the source materials (e.g. new textures)
     void RefreshMaterials()
     {
         DestroyMaterials();
+        PickSurfaces();
         floorMaterials = new Material[FloorGroupCount];
-        for (int i = 1; i < FloorGroupCount; i++) floorMaterials[i] = Copy(floorMaterial);
+        for (int i = 1; i < FloorGroupCount; i++) floorMaterials[i] = Copy(floorSource);
 
-        // slot 0 is the plain room floor, the asset itself
-        floorMaterials[FloorRoom] = floorMaterial;
-        Tint(floorMaterials[FloorCorridor], floorMaterial, Color.black, 0.2f);
-        Tint(floorMaterials[2], floorMaterial, MapStyle.Attacker, roleTint);
-        Tint(floorMaterials[3], floorMaterial, MapStyle.Defender, roleTint);
-        Tint(floorMaterials[4], floorMaterial, MapStyle.Mid, roleTint);
-        Tint(floorMaterials[5], floorMaterial, MapStyle.Site, roleTint);
+        // slot 0 is the plain room floor, the source itself
+        floorMaterials[FloorRoom] = floorSource;
+        Tint(floorMaterials[FloorCorridor], floorSource, Color.black, 0.2f);
+        Tint(floorMaterials[2], floorSource, MapStyle.Attacker, roleTint);
+        Tint(floorMaterials[3], floorSource, MapStyle.Defender, roleTint);
+        Tint(floorMaterials[4], floorSource, MapStyle.Mid, roleTint);
+        Tint(floorMaterials[5], floorSource, MapStyle.Site, roleTint);
 
         // wall tops a bit darker than the walls, so outlines read clearly from above
-        wallTopMaterial = Copy(wallMaterial);
-        Tint(wallTopMaterial, wallMaterial, Color.black, 0.45f);
+        wallTopMaterial = Copy(wallSource);
+        Tint(wallTopMaterial, wallSource, Color.black, 0.45f);
+    }
+
+    // picks this build's floor and wall: the assigned materials, the fixed noise textures,
+    // or a pick from the seed out of the noise textures plus any extra materials
+    void PickSurfaces()
+    {
+        floorSource = floorMaterial;
+        wallSource = wallMaterial;
+        SurfaceSummary = "Assigned materials";
+        if (surfaceMode == SurfaceMode.Assigned) return;
+
+        // its own rng off the seed, so the pick is repeatable and never changes the layout
+        var rng = new System.Random(unchecked(seed ^ 0x5F7A3));
+        var floor = surfaceMode == SurfaceMode.Fixed
+            ? new SurfaceChoice(floorSurface)
+            : SurfaceChoice.Pick(rng, SurfaceTextures.FloorKinds, extraFloorMaterials);
+        var wall = surfaceMode == SurfaceMode.Fixed
+            ? new SurfaceChoice(wallSurface)
+            : SurfaceChoice.Pick(rng, SurfaceTextures.WallKinds, extraWallMaterials);
+
+        floorSource = SurfaceMaterial(floor, floorMaterial);
+        wallSource = SurfaceMaterial(wall, wallMaterial);
+        SurfaceSummary = $"{floor.Name} floor, {wall.Name} walls";
+    }
+
+    // a passed-in material is used as it is, plain keeps the template, and a noise kind gets a copy
+    // of the template with its texture (white base color, so the texture shows its real colors
+    // and role tints still blend over it)
+    Material SurfaceMaterial(SurfaceChoice choice, Material template)
+    {
+        if (choice.plain) return template;
+        if (choice.material != null) return choice.material;
+        if (template == null) return null;
+
+        var m = new Material(template) { name = SurfaceTextures.Name(choice.kind), hideFlags = HideFlags.DontSave };
+        var tex = SurfaceTextures.Get(choice.kind, choice.variant);
+        float scale = SurfaceTextures.TileScale(choice.kind);
+        foreach (var prop in new[] { "_BaseMap", "_MainTex" })
+        {
+            if (!m.HasProperty(prop)) continue;
+            m.SetTexture(prop, tex);
+            m.SetTextureScale(prop, new Vector2(scale, scale));
+        }
+        foreach (var prop in new[] { "_BaseColor", "_Color" })
+            if (m.HasProperty(prop)) m.SetColor(prop, Color.white);
+
+        // stone and concrete are matte
+        if (m.HasProperty("_Smoothness")) m.SetFloat("_Smoothness", 0.12f);
+        generatedSurfaces.Add(m);
+        return m;
     }
 
     static Material Copy(Material source)
@@ -342,6 +409,11 @@ public class baseMap : MonoBehaviour
         }
         if (wallTopMaterial != null) SafeDestroy(wallTopMaterial);
         wallTopMaterial = null;
+
+        // the textures themselves stay cached in SurfaceTextures, only the material copies go
+        foreach (var m in generatedSurfaces)
+            if (m != null) SafeDestroy(m);
+        generatedSurfaces.Clear();
     }
 
     // meshes are rebuilt from the seed every time, so they are never saved into the scene

@@ -178,7 +178,7 @@ MeshRenderer:
   m_RendererPriority: 0
   m_Materials:
   - {fileID: 0}
-  - {fileID: 2100000, guid: 27f920c178dbec147a774b8736230506, type: 2}
+  - {fileID: 0}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0
@@ -620,7 +620,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5befd1f05bf58c24db0813d3eb060ee0, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::baseMap
-  seed: 1458823196
+  seed: 2028688587
   settings:
     width: 64
     height: 64
@@ -646,6 +646,11 @@ MonoBehaviour:
   wallMaterial: {fileID: 2100000, guid: 27f920c178dbec147a774b8736230506, type: 2}
   ceilingMaterial: {fileID: 2100000, guid: 27f920c178dbec147a774b8736230506, type: 2}
   roleTint: 0.4
+  surfaceMode: 2
+  floorSurface: 0
+  wallSurface: 2
+  extraFloorMaterials: []
+  extraWallMaterials: []
   spawnPlayerInMap: 1
   drawPartitions: 1
   drawRooms: 1
@@ -749,7 +754,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: 27f920c178dbec147a774b8736230506, type: 2}
+  - {fileID: 0}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0

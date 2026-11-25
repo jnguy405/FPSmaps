@@ -152,6 +152,14 @@ public class MapUI : MonoBehaviour
             map.RebuildGeometry();
         }
         map.showOverlay = GUILayout.Toggle(map.showOverlay, " Show minimap  [M]", MapStyle.Toggle, GUILayout.Height(26f));
+
+        // cycles assigned, fixed and random surfaces, then shows what the map ended up with
+        if (GUILayout.Button($"Surfaces: {map.surfaceMode}", MapStyle.Button, GUILayout.Height(28f)))
+        {
+            map.surfaceMode = (SurfaceMode)(((int)map.surfaceMode + 1) % 3);
+            map.RebuildGeometry();
+        }
+        GUILayout.Label(map.SurfaceSummary, MapStyle.Small);
     }
 
     // summary, then the distance and entrance report
