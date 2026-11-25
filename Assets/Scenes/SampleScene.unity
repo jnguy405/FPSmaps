@@ -620,7 +620,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5befd1f05bf58c24db0813d3eb060ee0, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::baseMap
-  seed: 522655580
+  seed: 1458823196
   settings:
     width: 64
     height: 64

@@ -98,8 +98,8 @@ public class MapUI : MonoBehaviour
     {
         GUILayout.Label("SEED", MapStyle.Header);
         GUILayout.BeginHorizontal();
-        seedText = GUILayout.TextField(seedText, GUILayout.Height(24f));
-        if (GUILayout.Button("Random", MapStyle.Button, GUILayout.Width(76f), GUILayout.Height(24f)))
+        seedText = GUILayout.TextField(seedText, MapStyle.TextField, GUILayout.Height(26f));
+        if (GUILayout.Button("Random", MapStyle.Button, GUILayout.Width(80f), GUILayout.Height(26f)))
         {
             seedText = Random.Range(0, int.MaxValue).ToString();
             Apply();
@@ -129,7 +129,7 @@ public class MapUI : MonoBehaviour
     {
         var c = map.constraints;
         GUILayout.Label("CONSTRAINTS", MapStyle.Header);
-        c.enabled = GUILayout.Toggle(c.enabled, " Use attack/defense constraints");
+        c.enabled = GUILayout.Toggle(c.enabled, " Use attack/defense constraints", MapStyle.Toggle, GUILayout.Height(26f));
         if (!c.enabled) return;
 
         // the rules themselves are fixed, only how many sites the map has is a choice
@@ -151,7 +151,7 @@ public class MapUI : MonoBehaviour
             map.wallHeight = height;
             map.RebuildGeometry();
         }
-        map.showOverlay = GUILayout.Toggle(map.showOverlay, " Show minimap  [M]");
+        map.showOverlay = GUILayout.Toggle(map.showOverlay, " Show minimap  [M]", MapStyle.Toggle, GUILayout.Height(26f));
     }
 
     // summary, then the distance and entrance report
@@ -176,16 +176,16 @@ public class MapUI : MonoBehaviour
             string hint = map.DesignerActive
                 ? "Designer view: WASD pan   Q/E rotate   scroll zoom   right-drag orbit   F frame   V exit"
                 : "[Tab] map generator   [V] designer view";
-            MapStyle.ShadowLabel(new Rect(16f, Screen.height - 30f, Screen.width - 32f, 20f), hint, MapStyle.Small);
+            MapStyle.HaloLabel(new Rect(16f, Screen.height - 30f, Screen.width - 32f, 20f), hint, MapStyle.Small);
         }
     }
 
-    // small dot with a dark rim, so it reads against light walls and dark floors alike
+    // small light dot with a dark rim, so it reads against light walls and dark floors alike
     static void DrawCrosshair()
     {
         float cx = Screen.width / 2f, cy = Screen.height / 2f;
-        MapStyle.Fill(new Rect(cx - 3f, cy - 3f, 6f, 6f), new Color(0f, 0f, 0f, 0.6f));
-        MapStyle.Fill(new Rect(cx - 2f, cy - 2f, 4f, 4f), MapStyle.TextColor);
+        MapStyle.Fill(new Rect(cx - 3f, cy - 3f, 6f, 6f), MapStyle.Halo);
+        MapStyle.Fill(new Rect(cx - 2f, cy - 2f, 4f, 4f), MapStyle.Ink);
     }
 
     // name of the area under the player, centered near the bottom of the screen
@@ -194,7 +194,7 @@ public class MapUI : MonoBehaviour
         if (player == null) return;
         string area = map.AreaNameAt(player.transform.position);
         if (area == null) return;
-        MapStyle.ShadowLabel(new Rect(0f, Screen.height - 76f, Screen.width, 32f), area, MapStyle.Area);
+        MapStyle.HaloLabel(new Rect(0f, Screen.height - 76f, Screen.width, 32f), area, MapStyle.Area);
     }
 
     // CONTROLS
@@ -215,7 +215,7 @@ public class MapUI : MonoBehaviour
     {
         GUILayout.BeginHorizontal();
         GUILayout.Label(label, MapStyle.Label, GUILayout.Width(140f));
-        value = GUILayout.HorizontalSlider(value, min, max, GUILayout.ExpandWidth(true));
+        value = GUILayout.HorizontalSlider(value, min, max, MapStyle.Slider, MapStyle.SliderThumb, GUILayout.ExpandWidth(true));
         GUILayout.Label(value.ToString(format), MapStyle.Small, GUILayout.Width(36f));
         GUILayout.EndHorizontal();
         return value;
