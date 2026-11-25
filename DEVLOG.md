@@ -50,8 +50,27 @@ A dated history of FPSmaps, built from the commit log. Newest entries are at the
 - Trimmed the constraint code without changing its output (checked against 350 saved results)
 - After the commit: added `CONSTRAINTS.md` (every rule, its value and how to change it) and this devlog
 
+## Sun 11/22: UI polish
+
+- Rethemed the panel, HUD and minimap in a dark blue-black palette with a bright blue accent (pastel blue was tried first, then dropped)
+- Sharper details: rounded controls with a 3px radius and 1px outlines, drawn in code and 9-sliced so they scale cleanly
+- Custom styles for the seed field, toggles and sliders, so no default Unity skin shows through
+- Outlined text for the HUD hint and area name, and a crosshair with a dark rim, so both read against any wall
+- New role colors on the minimap: orange attackers, blue defenders, purple mid, green sites
+- The report shows only the summary and notes
+
+## Tue 11/24: Wall textures and noise
+
+- `Assets/Scripts/Textures/`: `Noise` (tileable value noise, fbm and Worley cells) and `SurfaceTextures`, which draws textures in code so no image files are needed
+- Chalky sandstone walls in a desert tactical shooter style: swirled plaster, powdery chalk patches, flaked spots showing darker stone, hairline cracks and faint stone courses
+- 8 wall variants, each with its own tone, amount of wear and chalk, and stone courses shown or not, so maps look different from seed to seed
+- Surface modes on the map: **Assigned** (the plain grey materials), **Fixed** (a chosen texture) and **RandomFromSeed** (picked from the seed)
+- Extra floor and wall materials can be passed in and join the random pick
+- **Surfaces** button in the panel's VIEW section cycles the modes without a new layout
+- Floors stay plain for now, because the sandstone tiles read as wood planks from floor level
+
 ## Next
 
-- UVs and textures for floors and walls
+- Ground texture for floors
 - Audio
 - WebGL build for itch.io
